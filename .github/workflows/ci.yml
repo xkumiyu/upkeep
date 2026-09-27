@@ -15,6 +15,15 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v7
 
+      - name: Check installer syntax
+        run: |
+          for script in install.sh install_test.sh; do
+            sh -n "$script"
+          done
+
+      - name: Smoke-test installer
+        run: sh install_test.sh
+
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
@@ -24,23 +33,17 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 
-      - name: Check installer syntax
-        run: sh -n install.sh
-
-      - name: Smoke-test installer
-        working-directory: ${{ runner.temp }}
-        run: |
-          UPKEEP_BIN_DIR="$RUNNER_TEMP/upkeep/bin" \
-          XDG_CONFIG_HOME="$RUNNER_TEMP/upkeep/config" \
-          "$GITHUB_WORKSPACE/install.sh"
-          test -x "$RUNNER_TEMP/upkeep/bin/upkeep"
-          test -f "$RUNNER_TEMP/upkeep/config/upkeep/config.toml"
-
       - name: Test
         run: go test -race ./...
 
       - name: Vet
         run: go vet ./...
 
-      - name: Build
-        run: go build -buildvcs=false ./...
+      - name: Build release-style binary
+        env:
+          RELEASE_TAG: v0.0.0-ci
+        run: |
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -ldflags "-X main.version=$RELEASE_TAG" \
+            -o "$RUNNER_TEMP/upkeep" .
+          test "$("$RUNNER_TEMP/upkeep" --version)" = "upkeep $RELEASE_TAG"

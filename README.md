@@ -5,10 +5,6 @@
 Define the update commands you want to run and how often each should run.
 Use `upkeep` manually or invoke it from shell startup without running every update command on every terminal launch.
 
-## Requirements
-
-- Go 1.26 or later
-
 ## Install & Update
 
 Install or update `upkeep`:

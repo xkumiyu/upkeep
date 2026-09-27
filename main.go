@@ -96,7 +96,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: upkeep <command> [options]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  run       Run due jobs; --interval overrides all job intervals.")
+	fmt.Fprintln(w, "  run       Run due jobs.")
 	fmt.Fprintln(w, "  config    Show configuration and state paths.")
 	fmt.Fprintln(w, "  status    Show the last run status.")
 	fmt.Fprintln(w, "  unlock    Remove a stale run lock.")
@@ -110,24 +110,45 @@ func printUsage(w io.Writer) {
 func printCommandUsage(w io.Writer, command string) {
 	usage := ""
 	description := ""
+	options := []string{}
 	switch command {
 	case "run":
-		usage = "Usage: upkeep run [--interval DURATION] [--dry-run] [--yes] [--config PATH] [--state-dir PATH]"
-		description = "Preview due jobs with --dry-run; otherwise run them after asking for approval. --interval overrides every job interval; use -y or --yes to skip approval."
+		usage = "Usage: upkeep run [options]"
+		description = "Run due jobs."
+		options = []string{
+			"  --interval DURATION  override all job intervals for this run.",
+			"  --dry-run            show due jobs without running them.",
+			"  --yes, -y            run without asking for approval.",
+			"  --config PATH        path to config.toml.",
+			"  --state-dir PATH     directory for state, locks, and logs.",
+		}
 	case "config":
-		usage = "Usage: upkeep config [--config PATH] [--state-dir PATH]"
+		usage = "Usage: upkeep config [options]"
 		description = "Show configuration and state paths."
+		options = []string{
+			"  --config PATH        path to config.toml.",
+			"  --state-dir PATH     directory for state, locks, and logs.",
+		}
 	case "status":
-		usage = "Usage: upkeep status [--state-dir PATH]"
+		usage = "Usage: upkeep status [options]"
 		description = "Show the last run times and result."
+		options = []string{
+			"  --state-dir PATH     directory for state, locks, and logs.",
+		}
 	case "unlock":
-		usage = "Usage: upkeep unlock [--state-dir PATH]"
+		usage = "Usage: upkeep unlock [options]"
 		description = "Remove a lock left by a process that is no longer running."
+		options = []string{
+			"  --state-dir PATH     directory for state, locks, and logs.",
+		}
 	default:
 		printUsage(w)
 		return
 	}
-	fmt.Fprintf(w, "%s\n\n%s\n", usage, description)
+	fmt.Fprintf(w, "%s\n\n%s\n\nOptions:\n", usage, description)
+	for _, option := range options {
+		fmt.Fprintln(w, option)
+	}
 }
 
 func printVersion(w io.Writer) {

@@ -13,7 +13,7 @@ func TestRunCLIHelpListsCommands(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Usage: upkeep <command> [options]",
-		"run       Run due jobs; --interval overrides all job intervals.",
+		"run       Run due jobs.",
 		"config    Show configuration and state paths.",
 		"status    Show the last run status.",
 		"unlock    Remove a stale run lock.",
@@ -22,6 +22,9 @@ func TestRunCLIHelpListsCommands(t *testing.T) {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("help = %q, want %q", output.String(), want)
 		}
+	}
+	if strings.Contains(output.String(), "--interval overrides all job intervals") {
+		t.Fatalf("help = %q, want a generic run summary", output.String())
 	}
 	if strings.Contains(output.String(), "  help ") {
 		t.Fatalf("help = %q, want no help subcommand", output.String())
@@ -51,8 +54,14 @@ func TestRunCLICommandHelpDescribesRun(t *testing.T) {
 		t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
 	}
 	for _, want := range []string{
-		"Usage: upkeep run [--interval DURATION] [--dry-run] [--yes] [--config PATH] [--state-dir PATH]",
-		"Preview due jobs with --dry-run; otherwise run them after asking for approval. --interval overrides every job interval; use -y or --yes to skip approval.",
+		"Usage: upkeep run [options]",
+		"Run due jobs.",
+		"Options:",
+		"  --interval DURATION  override all job intervals for this run.",
+		"  --dry-run            show due jobs without running them.",
+		"  --yes, -y            run without asking for approval.",
+		"  --config PATH        path to config.toml.",
+		"  --state-dir PATH     directory for state, locks, and logs.",
 	} {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("command help = %q, want %q", output.String(), want)
@@ -60,16 +69,53 @@ func TestRunCLICommandHelpDescribesRun(t *testing.T) {
 	}
 }
 
-func TestRunCLICommandHelpDescribesAllCommands(t *testing.T) {
-	for _, command := range []string{"config", "status", "unlock"} {
-		var output, errorsOutput strings.Builder
-		code := runCLI([]string{command, "--help"}, strings.NewReader(""), &output, &errorsOutput)
-		if code != 0 {
-			t.Fatalf("%s help exit code = %d, errors = %q", command, code, errorsOutput.String())
-		}
-		if !strings.Contains(output.String(), "Usage: upkeep "+command) {
-			t.Fatalf("%s help = %q, want command usage", command, output.String())
-		}
+func TestRunCLICommandHelpUsesStandardStructure(t *testing.T) {
+	tests := []struct {
+		command     string
+		usage       string
+		description string
+		options     []string
+	}{
+		{
+			command:     "config",
+			usage:       "Usage: upkeep config [options]",
+			description: "Show configuration and state paths.",
+			options: []string{
+				"  --config PATH        path to config.toml.",
+				"  --state-dir PATH     directory for state, locks, and logs.",
+			},
+		},
+		{
+			command:     "status",
+			usage:       "Usage: upkeep status [options]",
+			description: "Show the last run times and result.",
+			options: []string{
+				"  --state-dir PATH     directory for state, locks, and logs.",
+			},
+		},
+		{
+			command:     "unlock",
+			usage:       "Usage: upkeep unlock [options]",
+			description: "Remove a lock left by a process that is no longer running.",
+			options: []string{
+				"  --state-dir PATH     directory for state, locks, and logs.",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.command, func(t *testing.T) {
+			var output, errorsOutput strings.Builder
+			code := runCLI([]string{test.command, "--help"}, strings.NewReader(""), &output, &errorsOutput)
+			if code != 0 {
+				t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
+			}
+			for _, want := range append([]string{test.usage, test.description, "Options:"}, test.options...) {
+				if !strings.Contains(output.String(), want) {
+					t.Fatalf("help = %q, want %q", output.String(), want)
+				}
+			}
+		})
 	}
 }
 

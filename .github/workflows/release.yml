@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version component to increment"
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Calculate release tag
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -eu
+          latest_tag=$(git tag --list --sort=-version:refname | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/ { print; exit }')
+          if [ -n "$latest_tag" ]; then
+            version=${latest_tag#v}
+            major=${version%%.*}
+            remainder=${version#*.}
+            minor=${remainder%%.*}
+            patch=${remainder#*.}
+          else
+            major=0
+            minor=0
+            patch=0
+          fi
+          case "$BUMP" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+            *)
+              echo "Unsupported bump: $BUMP" >&2
+              exit 1
+              ;;
+          esac
+          release_tag="v$major.$minor.$patch"
+          if git rev-parse --verify "refs/tags/$release_tag" >/dev/null 2>&1; then
+            echo "Release tag already exists: $release_tag" >&2
+            exit 1
+          fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $release_tag"
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build release assets
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            release_os=${target%/*}
+            release_arch=${target#*/}
+            CGO_ENABLED=0 GOOS="$release_os" GOARCH="$release_arch" \
+              go build -trimpath -buildvcs=false \
+              -ldflags "-X main.version=$RELEASE_TAG" \
+              -o "dist/upkeep-$release_os-$release_arch" .
+          done
+          cp config.example.toml dist/config.example.toml
+          (cd dist && sha256sum upkeep-* config.example.toml > checksums.txt)
+
+      - name: Verify release assets
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          test "$(./dist/upkeep-linux-amd64 --version)" = "upkeep $RELEASE_TAG"
+          (cd dist && sha256sum -c checksums.txt)
+
+      - name: Tag release
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$RELEASE_TAG" --verify-tag --generate-notes dist/*
