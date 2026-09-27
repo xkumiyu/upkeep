@@ -1,0 +1,25 @@
+[tools]
+go = "1.27"
+
+[env]
+_.path = "{{config_root}}/bin"
+
+[tasks.build]
+description = "Build the upkeep binary"
+run = 'version=$(git describe --tags --always --dirty 2>/dev/null || printf dev); go build -buildvcs=false -ldflags "-X main.version=$version" -o bin/upkeep .'
+
+[tasks.test]
+description = "Run the test suite with the race detector"
+run = "go test -race ./..."
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.fmt]
+description = "Format Go source files"
+run = "gofmt -w *.go"
+
+[tasks.check]
+description = "Run tests, vet, and build"
+depends = ["test", "vet", "build"]
