@@ -49,10 +49,12 @@ func runCLI(args []string, in io.Reader, out, errOut io.Writer) int {
 	}
 	fs.StringVar(&stateDir, "state-dir", stateDir, "directory for state, locks, and logs")
 	intervalArg := ""
+	groupName := ""
 	dryRun := false
 	yes := false
 	if command == "run" {
 		fs.StringVar(&intervalArg, "interval", "", "override all job intervals for this run")
+		fs.StringVar(&groupName, "group", "", "run only jobs in the named group")
 		fs.BoolVar(&dryRun, "dry-run", false, "show due jobs without running them")
 		fs.BoolVar(&yes, "yes", false, "run without asking for approval")
 		fs.BoolVar(&yes, "y", false, "run without asking for approval")
@@ -65,13 +67,15 @@ func runCLI(args []string, in io.Reader, out, errOut io.Writer) int {
 		return 2
 	}
 	intervalSet := false
+	groupSet := false
 	fs.Visit(func(f *flag.Flag) {
 		intervalSet = intervalSet || f.Name == "interval"
+		groupSet = groupSet || f.Name == "group"
 	})
 
 	switch command {
 	case "run":
-		return runCommand(configPath, stateDir, intervalArg, intervalSet, dryRun, yes, isInteractive(), in, out, errOut)
+		return runCommand(configPath, stateDir, intervalArg, intervalSet, groupName, groupSet, dryRun, yes, isInteractive(), in, out, errOut)
 	case "config":
 		return configCommand(configPath, stateDir, out, errOut)
 	case "unlock":
@@ -116,7 +120,8 @@ func printCommandUsage(w io.Writer, command string) {
 		usage = "Usage: upkeep run [options]"
 		description = "Run due jobs."
 		options = []string{
-			"  --interval DURATION  override all job intervals for this run.",
+			"  --interval DURATION  override all configured intervals for this run.",
+			"  --group NAME         run only jobs in the named group.",
 			"  --dry-run            show due jobs without running them.",
 			"  --yes, -y            run without asking for approval.",
 			"  --config PATH        path to config.toml.",
