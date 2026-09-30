@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,60 @@ command = "   "
 	_, err := loadConfig(configPath)
 	if err == nil || !strings.Contains(err.Error(), "command is required") {
 		t.Fatalf("loadConfig error = %v, want a required command error", err)
+	}
+}
+
+func TestLoadConfigRejectsMissingJobsWithConfigName(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte(""), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig(configPath)
+	if err == nil || err.Error() != "at least one job is required in config.toml" {
+		t.Fatalf("loadConfig error = %v, want missing jobs error naming config.toml", err)
+	}
+}
+
+func TestLoadConfigSupportsCommands(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "upkeep.toml")
+	if err := os.WriteFile(configPath, []byte(`
+[[jobs]]
+name = "packages"
+commands = [
+  "printf first",
+  "printf second",
+]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := cfg.Jobs[0].Commands, []string{"printf first", "printf second"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestLoadConfigRejectsCommandAndCommands(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "upkeep.toml")
+	if err := os.WriteFile(configPath, []byte(`
+[[jobs]]
+name = "packages"
+command = "printf one"
+commands = ["printf two"]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig(configPath)
+	if err == nil || !strings.Contains(err.Error(), "command and commands cannot both be set") {
+		t.Fatalf("loadConfig error = %v, want command conflict error", err)
 	}
 }
 
@@ -79,6 +134,104 @@ command = "true"
 	}
 	if cfg.Jobs[0].Interval != "24h" {
 		t.Fatalf("job interval = %q, want 24h", cfg.Jobs[0].Interval)
+	}
+	if len(cfg.Groups) != 0 {
+		t.Fatalf("groups = %+v, want no groups for flat config", cfg.Groups)
+	}
+}
+
+func TestLoadConfigSupportsGroupsAndIntervalPrecedence(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`
+interval = "168h"
+
+[[jobs]]
+name = "daily"
+command = "true"
+
+[[jobs]]
+name = "reports-first"
+interval = "1h"
+command = "true"
+
+[[jobs]]
+name = "reports-second"
+command = "true"
+
+[[groups]]
+name = "reports"
+interval = "720h"
+jobs = ["daily", "reports-first", "reports-second"]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobs := cfg.orderedJobs()
+	if len(jobs) != 3 {
+		t.Fatalf("ordered jobs = %+v, want 3 jobs", jobs)
+	}
+	for i, test := range []struct {
+		name     string
+		interval string
+	}{
+		{name: "daily", interval: "720h"},
+		{name: "reports-first", interval: "1h"},
+		{name: "reports-second", interval: "720h"},
+	} {
+		if jobs[i].Name != test.name || jobs[i].Interval != test.interval {
+			t.Errorf("ordered job %d = %+v, want %s with interval %s", i, jobs[i], test.name, test.interval)
+		}
+	}
+}
+
+func TestLoadConfigRejectsUnknownGroupJob(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`
+[[jobs]]
+name = "daily"
+command = "true"
+
+[[groups]]
+name = "default"
+jobs = ["missing"]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig(configPath)
+	if err == nil || !strings.Contains(err.Error(), `unknown job "missing"`) {
+		t.Fatalf("loadConfig error = %v, want unknown group job error", err)
+	}
+}
+
+func TestLoadConfigRejectsJobInMultipleGroups(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`
+[[jobs]]
+name = "shared"
+command = "true"
+
+[[groups]]
+name = "default"
+jobs = ["shared"]
+
+[[groups]]
+name = "reports"
+jobs = ["shared"]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadConfig(configPath)
+	if err == nil || !strings.Contains(err.Error(), `job "shared" belongs to multiple groups`) {
+		t.Fatalf("loadConfig error = %v, want multiple group error", err)
 	}
 }
 

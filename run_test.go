@@ -27,6 +27,21 @@ func TestExecuteJobForwardsStandardInput(t *testing.T) {
 	}
 }
 
+func TestExecuteJobRunsCommandsInOrderAndStopsOnFailure(t *testing.T) {
+	job := Job{
+		Name:     "commands",
+		Scope:    "user",
+		Commands: []string{"printf first", "false", "printf third"},
+	}
+	var output strings.Builder
+	if err := executeJob(job, strings.NewReader(""), &output, false); err == nil {
+		t.Fatal("executeJob error = nil, want failure")
+	}
+	if got, want := output.String(), "first"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
 func TestRunUserJobWritesStateAndLog(t *testing.T) {
 	configDir := t.TempDir()
 	stateDir := filepath.Join(t.TempDir(), "state")
@@ -420,6 +435,97 @@ func TestRunDueCommandIntervalOverrideAppliesToEveryJob(t *testing.T) {
 	}
 }
 
+func TestDueJobsUsesGroupIntervalsAndJobOrder(t *testing.T) {
+	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	cfg := Config{
+		Jobs: []Job{
+			{Name: "daily", Scope: "user", Command: ":"},
+			{Name: "reports-first", Scope: "user", Command: ":"},
+			{Name: "reports-second", Scope: "user", Command: ":"},
+		},
+		Groups: []Group{
+			{Name: "reports", Interval: "720h", Jobs: []string{"reports-first", "reports-second"}},
+			{Name: "default", Interval: "24h", Jobs: []string{"daily"}},
+		},
+	}
+	state := State{LastSuccessByJob: map[string]time.Time{
+		"daily":          now.Add(-25 * time.Hour),
+		"reports-first":  now.Add(-721 * time.Hour),
+		"reports-second": now.Add(-719 * time.Hour),
+	}}
+
+	due, err := dueJobs(cfg, state, 168*time.Hour, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 2 {
+		t.Fatalf("due jobs = %+v, want daily and reports-first", due)
+	}
+	if due[0].Name != "daily" || due[1].Name != "reports-first" {
+		t.Fatalf("due job order = %q, %q, want daily, reports-first", due[0].Name, due[1].Name)
+	}
+}
+
+func TestDueJobsIntervalOverrideAppliesToEveryJob(t *testing.T) {
+	now := time.Now()
+	cfg := Config{
+		Jobs: []Job{
+			{Name: "daily", Scope: "user", Command: ":"},
+			{Name: "reports", Scope: "user", Command: ":"},
+		},
+		Groups: []Group{
+			{Name: "default", Interval: "720h", Jobs: []string{"daily"}},
+			{Name: "reports", Interval: "720h", Jobs: []string{"reports"}},
+		},
+	}
+	state := State{LastSuccessByJob: map[string]time.Time{
+		"daily":   now.Add(-time.Hour),
+		"reports": now.Add(-time.Hour),
+	}}
+
+	due, err := dueJobs(cfg, state, 0, true, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 2 {
+		t.Fatalf("due jobs = %+v, want both group jobs", due)
+	}
+}
+
+func TestRunOnceLockedExecutesJobsInConfigOrder(t *testing.T) {
+	stateDir := t.TempDir()
+	release, err := acquireLock(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	cfg := Config{
+		Jobs: []Job{
+			{Name: "daily", Scope: "user", Command: "printf daily"},
+			{Name: "reports-first", Scope: "user", Command: "printf reports-first"},
+			{Name: "reports-second", Scope: "user", Command: "printf reports-second"},
+		},
+		Groups: []Group{
+			{Name: "reports", Jobs: []string{"reports-first", "reports-second"}},
+			{Name: "default", Jobs: []string{"daily"}},
+		},
+	}
+	var output strings.Builder
+	if _, err := runOnceLocked(cfg, stateDir, "manual", false, strings.NewReader(""), &output, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	last := -1
+	for _, name := range []string{"daily", "reports-first", "reports-second"} {
+		index := strings.Index(output.String(), `Running user job "`+name+`".`)
+		if index <= last {
+			t.Fatalf("output = %q, want %s after previous job", output.String(), name)
+		}
+		last = index
+	}
+}
+
 func TestDryRunReportsDueAndNotDueJobsWithoutSideEffects(t *testing.T) {
 	root := t.TempDir()
 	stateDir := filepath.Join(root, "state")
@@ -620,6 +726,92 @@ command = "printf 'manual update'"
 	}
 	if strings.Contains(output.String(), "updates are due") {
 		t.Fatalf("output = %q, want no approval prompt", output.String())
+	}
+}
+
+func TestRunCLIGroupRunsOnlySelectedJobs(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	stateDir := filepath.Join(root, "state")
+	if err := os.WriteFile(configPath, []byte(`
+[[jobs]]
+name = "mise"
+command = "printf mise"
+
+[[jobs]]
+name = "apm"
+command = "printf apm"
+
+[[jobs]]
+name = "other"
+command = "printf other"
+
+[[groups]]
+name = "dev-tools"
+jobs = ["mise", "apm"]
+
+[[groups]]
+name = "other-tools"
+jobs = ["other"]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var output, errorsOutput strings.Builder
+	code := runCLI([]string{
+		"run",
+		"--group", "dev-tools",
+		"--yes",
+		"--interval=0",
+		"--config", configPath,
+		"--state-dir", stateDir,
+	}, strings.NewReader(""), &output, &errorsOutput)
+	if code != 0 {
+		t.Fatalf("exit code = %d, errors = %q, output = %q", code, errorsOutput.String(), output.String())
+	}
+	if !strings.Contains(output.String(), "mise") || !strings.Contains(output.String(), "apm") {
+		t.Fatalf("output = %q, want selected group jobs", output.String())
+	}
+	if strings.Contains(output.String(), "other") {
+		t.Fatalf("output = %q, want other group job excluded", output.String())
+	}
+	state, err := loadState(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.LastResultByJob["other"] != jobResultNotRun {
+		t.Fatalf("other job result = %q, want not run", state.LastResultByJob["other"])
+	}
+}
+
+func TestRunCLIRejectsUnknownGroup(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`
+[[jobs]]
+name = "mise"
+command = "true"
+
+[[groups]]
+name = "dev-tools"
+jobs = ["mise"]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	var output, errorsOutput strings.Builder
+	code := runCLI([]string{
+		"run",
+		"--group", "missing",
+		"--dry-run",
+		"--config", configPath,
+		"--state-dir", filepath.Join(root, "state"),
+	}, strings.NewReader(""), &output, &errorsOutput)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+	if !strings.Contains(errorsOutput.String(), `unknown group "missing"`) {
+		t.Fatalf("errors = %q, want unknown group error", errorsOutput.String())
 	}
 }
 

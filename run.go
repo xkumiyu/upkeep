@@ -64,11 +64,18 @@ func (r RunResult) ExitCode() int {
 	return 0
 }
 
-func runCommand(configPath, stateDir, intervalArg string, intervalSet, dryRun, yes, interactive bool, in io.Reader, out, errOut io.Writer) int {
+func runCommand(configPath, stateDir, intervalArg string, intervalSet bool, groupName string, groupSet, dryRun, yes, interactive bool, in io.Reader, out, errOut io.Writer) int {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
+	}
+	if groupSet {
+		cfg, err = cfg.selectGroup(groupName)
+		if err != nil {
+			fmt.Fprintln(errOut, "upkeep:", err)
+			return 1
+		}
 	}
 
 	interval, snooze, approvalTimeout, err := cfg.durations()
@@ -108,6 +115,7 @@ func dryRunCommand(cfg Config, stateDir string, interval time.Duration, interval
 	for _, job := range due {
 		dueSet[job.Name] = true
 	}
+	jobs := cfg.orderedJobs()
 
 	if len(due) > 0 {
 		fmt.Fprintln(out, "Updates are due.")
@@ -116,14 +124,16 @@ func dryRunCommand(cfg Config, stateDir string, interval time.Duration, interval
 	}
 	fmt.Fprintln(out, "\nDry run:")
 	first := true
-	for _, job := range cfg.Jobs {
+	for _, job := range jobs {
 		if !first {
 			fmt.Fprintln(out)
 		}
 		fmt.Fprintf(out, "  %s (%s) : ", job.Name, job.Scope)
 		if dueSet[job.Name] {
 			fmt.Fprintln(out, "due now")
-			fmt.Fprintf(out, "    %s\n", job.Command)
+			for _, command := range job.commands() {
+				fmt.Fprintf(out, "    %s\n", command)
+			}
 		} else {
 			jobInterval, err := effectiveJobInterval(job, interval, intervalOverride)
 			if err != nil {
@@ -262,8 +272,9 @@ func runDueCommand(cfg Config, stateDir string, interval time.Duration, interval
 }
 
 func dueJobs(cfg Config, state State, globalInterval time.Duration, intervalOverride bool, now time.Time) ([]Job, error) {
-	due := make([]Job, 0, len(cfg.Jobs))
-	for _, job := range cfg.Jobs {
+	jobs := cfg.orderedJobs()
+	due := make([]Job, 0, len(jobs))
+	for _, job := range jobs {
 		interval, err := effectiveJobInterval(job, globalInterval, intervalOverride)
 		if err != nil {
 			return nil, err
@@ -345,10 +356,12 @@ func runOnceLocked(cfg Config, stateDir, trigger string, interactive bool, in io
 		return RunResult{}, err
 	}
 	now := time.Now()
+	allJobs := cfg.allJobs()
+	jobs := cfg.orderedJobs()
 	state.LastAttempt = now
 	state.LastExitCode = incompleteExitCode
-	state.LastResultByJob = make(map[string]string, len(cfg.Jobs))
-	for _, job := range cfg.Jobs {
+	state.LastResultByJob = make(map[string]string, len(allJobs))
+	for _, job := range allJobs {
 		state.LastResultByJob[job.Name] = jobResultNotRun
 		if due == nil || due[job.Name] {
 			state.LastResultByJob[job.Name] = jobResultIncomplete
@@ -380,7 +393,7 @@ func runOnceLocked(cfg Config, stateDir, trigger string, interactive bool, in io
 
 	result := RunResult{}
 	usePTY := interactive && isTerminalReader(in) && isTerminalWriter(out)
-	for _, job := range cfg.Jobs {
+	for _, job := range jobs {
 		if due != nil && !due[job.Name] {
 			continue
 		}
@@ -453,22 +466,30 @@ func authenticateSudo(in io.Reader, out io.Writer) error {
 }
 
 func executeJob(job Job, in io.Reader, output io.Writer, usePTY bool) error {
-	var cmd *exec.Cmd
-	if job.Scope == "system" {
-		cmd = exec.Command(sudoPath(), "-n", "/bin/sh", "-c", job.Command)
-	} else {
-		cmd = exec.Command("/bin/sh", "-c", job.Command)
+	for _, command := range job.commands() {
+		var cmd *exec.Cmd
+		if job.Scope == "system" {
+			cmd = exec.Command(sudoPath(), "-n", "/bin/sh", "-c", command)
+		} else {
+			cmd = exec.Command("/bin/sh", "-c", command)
+		}
+		if usePTY {
+			if err := executeJobWithPTY(cmd, in, output); err != nil {
+				return err
+			}
+			continue
+		}
+		cmd.Stdin = in
+		if cmd.Stdin == nil {
+			cmd.Stdin = os.Stdin
+		}
+		cmd.Stdout = output
+		cmd.Stderr = output
+		if err := cmd.Run(); err != nil {
+			return err
+		}
 	}
-	if usePTY {
-		return executeJobWithPTY(cmd, in, output)
-	}
-	cmd.Stdin = in
-	if cmd.Stdin == nil {
-		cmd.Stdin = os.Stdin
-	}
-	cmd.Stdout = output
-	cmd.Stderr = output
-	return cmd.Run()
+	return nil
 }
 
 func executeJobWithPTY(cmd *exec.Cmd, in io.Reader, output io.Writer) error {

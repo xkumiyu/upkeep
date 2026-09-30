@@ -1,21 +1,17 @@
-# Copy this file to ~/.config/upkeep/config.toml and edit the jobs below.
-# Each job runs one shell command. Combine multiple operations with &&.
-# scope defaults to "user". Use scope = "system" for a job that may require sudo.
+# Global defaults:
+# interval = "168h"         # Minimum time between update runs.
+# snooze = "24h"            # Suppress prompts for this long after a decline.
+# approval_timeout = "60s"  # Time allowed for an approval response.
 
-# Settings below are optional. Leave them commented out to use the defaults.
-#
-# interval = "168h"        # Default interval for jobs without their own interval.
-# snooze = "24h"            # Wait this long after declining an approval prompt.
-# approval_timeout = "60s"  # Wait this long for an approval response.
-
-[[jobs]]
-name = "user-packages"
-command = ":"
-# Replace the no-op command above with the package manager command used on this machine.
-
-# Debian/Ubuntu example. Uncomment and adjust as needed.
 # [[jobs]]
-# name = "system-packages"
-# scope = "system"
-# interval = "720h" # Run this job every 30 days.
-# command = "/usr/bin/apt-get update && /usr/bin/apt-get -y --no-remove upgrade"
+# name = "mise-package-update"
+# command = "mise upgrade"
+#
+# [[jobs]]
+# name = "system-package-update"
+# interval = "24h" # Overrides all other interval settings.
+# scope = "system" # Runs through sudo; requires an interactive terminal. Defaults to "user".
+# commands = [
+#   "apt-get update",
+#   "apt-get -y upgrade"
+# ]
