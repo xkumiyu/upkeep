@@ -1,5 +1,6 @@
 # Global defaults:
 # interval = "168h"         # Minimum time between update runs.
+# retry_interval = "2h"     # Time after a command failure; defaults to each job's effective interval.
 # snooze = "24h"            # Suppress prompts for this long after a decline.
 # approval_timeout = "60s"  # Time allowed for an approval response.
 
@@ -9,8 +10,9 @@
 #
 # [[jobs]]
 # name = "system-package-update"
-# interval = "24h" # Overrides all other interval settings.
-# scope = "system" # Runs through sudo; requires an interactive terminal. Defaults to "user".
+# interval = "24h"      # Overrides all other interval settings.
+# retry_interval = "1h" # Overrides group and global retry intervals.
+# scope = "system"     # Runs through sudo; requires an interactive terminal. Defaults to "user".
 # commands = [
 #   "apt-get update",
 #   "apt-get -y upgrade"

@@ -135,12 +135,11 @@ func dryRunCommand(cfg Config, stateDir string, interval time.Duration, interval
 				fmt.Fprintf(out, "    %s\n", command)
 			}
 		} else {
-			jobInterval, err := effectiveJobInterval(job, interval, intervalOverride)
+			nextDue, err := nextJobDue(state, job, interval, intervalOverride)
 			if err != nil {
 				fmt.Fprintln(errOut, "upkeep:", err)
 				return 1
 			}
-			nextDue := state.LastSuccessByJob[job.Name].Add(jobInterval)
 			fmt.Fprintf(out, "next due in %s\n", formatDurationUntil(nextDue.Sub(now)))
 		}
 		first = false
@@ -275,15 +274,40 @@ func dueJobs(cfg Config, state State, globalInterval time.Duration, intervalOver
 	jobs := cfg.orderedJobs()
 	due := make([]Job, 0, len(jobs))
 	for _, job := range jobs {
-		interval, err := effectiveJobInterval(job, globalInterval, intervalOverride)
+		nextDue, err := nextJobDue(state, job, globalInterval, intervalOverride)
 		if err != nil {
 			return nil, err
 		}
-		if isJobDue(state, job.Name, interval, now) {
+		if nextDue.IsZero() || !now.Before(nextDue) {
 			due = append(due, job)
 		}
 	}
 	return due, nil
+}
+
+// A completed failure replaces the success deadline until the job succeeds.
+func nextJobDue(state State, job Job, globalInterval time.Duration, intervalOverride bool) (time.Time, error) {
+	interval, err := effectiveJobInterval(job, globalInterval, intervalOverride)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if intervalOverride && interval == 0 {
+		return time.Time{}, nil
+	}
+	last := state.LastSuccessByJob[job.Name]
+	if failedAt := state.LastFailureByJob[job.Name]; !failedAt.IsZero() {
+		last = failedAt
+		if !intervalOverride && job.RetryInterval != "" {
+			interval, err = parseRetryInterval(job.RetryInterval, fmt.Sprintf("jobs[%s].retry_interval", job.Name))
+			if err != nil {
+				return time.Time{}, err
+			}
+		}
+	}
+	if last.IsZero() {
+		return time.Time{}, nil
+	}
+	return last.Add(interval), nil
 }
 
 func hasSystemJobs(jobs []Job) bool {
@@ -374,6 +398,8 @@ func runOnceLocked(cfg Config, stateDir, trigger string, interactive bool, in io
 		state.LastResultByJob[name] = jobResult
 		if success {
 			state.recordJobSuccess(name, time.Now())
+		} else if jobResult == jobResultFailed {
+			state.recordJobFailure(name, time.Now())
 		}
 		return saveState(stateDir, state)
 	}
