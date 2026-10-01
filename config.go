@@ -19,6 +19,7 @@ const (
 
 type Config struct {
 	Interval        string  `toml:"interval"`
+	RetryInterval   string  `toml:"retry_interval"`
 	Snooze          string  `toml:"snooze"`
 	ApprovalTimeout string  `toml:"approval_timeout"`
 	Jobs            []Job   `toml:"jobs"`
@@ -27,17 +28,19 @@ type Config struct {
 }
 
 type Group struct {
-	Name     string   `toml:"name"`
-	Interval string   `toml:"interval"`
-	Jobs     []string `toml:"jobs"`
+	Name          string   `toml:"name"`
+	Interval      string   `toml:"interval"`
+	RetryInterval string   `toml:"retry_interval"`
+	Jobs          []string `toml:"jobs"`
 }
 
 type Job struct {
-	Name     string   `toml:"name"`
-	Scope    string   `toml:"scope"`
-	Interval string   `toml:"interval"`
-	Command  string   `toml:"command"`
-	Commands []string `toml:"commands"`
+	Name          string   `toml:"name"`
+	Scope         string   `toml:"scope"`
+	Interval      string   `toml:"interval"`
+	RetryInterval string   `toml:"retry_interval"`
+	Command       string   `toml:"command"`
+	Commands      []string `toml:"commands"`
 }
 
 func configCommand(configPath, stateDir string, out, errOut io.Writer) int {
@@ -81,6 +84,11 @@ func loadConfig(path string) (Config, error) {
 	if interval <= 0 {
 		return Config{}, fmt.Errorf("interval must be positive")
 	}
+	if cfg.RetryInterval != "" {
+		if _, err := parseRetryInterval(cfg.RetryInterval, "retry_interval"); err != nil {
+			return Config{}, err
+		}
+	}
 	if snooze < 0 {
 		return Config{}, fmt.Errorf("snooze must not be negative")
 	}
@@ -123,6 +131,11 @@ func validateJobs(jobs []Job, path string, seen map[string]bool) error {
 			}
 			if interval <= 0 {
 				return fmt.Errorf("%s[%s].interval must be positive", path, job.Name)
+			}
+		}
+		if job.RetryInterval != "" {
+			if _, err := parseRetryInterval(job.RetryInterval, fmt.Sprintf("%s[%s].retry_interval", path, job.Name)); err != nil {
+				return err
 			}
 		}
 		if job.Command != "" && len(job.Commands) > 0 {
@@ -174,6 +187,11 @@ func validateGroups(groups []Group, jobs []Job) error {
 				return fmt.Errorf("%s.interval must be positive", path)
 			}
 		}
+		if group.RetryInterval != "" {
+			if _, err := parseRetryInterval(group.RetryInterval, path+".retry_interval"); err != nil {
+				return err
+			}
+		}
 		for _, jobName := range group.Jobs {
 			if strings.TrimSpace(jobName) == "" {
 				return fmt.Errorf("%s.jobs contains an empty job name", path)
@@ -211,16 +229,22 @@ func (c Config) selectGroup(name string) (Config, error) {
 }
 
 func (c Config) allJobs() []Job {
-	groupIntervals := make(map[string]string)
+	jobGroups := make(map[string]Group)
 	for _, group := range c.Groups {
 		for _, jobName := range group.Jobs {
-			groupIntervals[jobName] = group.Interval
+			jobGroups[jobName] = group
 		}
 	}
 	jobs := make([]Job, 0, len(c.Jobs))
 	for _, job := range c.Jobs {
 		if job.Interval == "" {
-			job.Interval = groupIntervals[job.Name]
+			job.Interval = jobGroups[job.Name].Interval
+		}
+		if job.RetryInterval == "" {
+			job.RetryInterval = jobGroups[job.Name].RetryInterval
+		}
+		if job.RetryInterval == "" {
+			job.RetryInterval = c.RetryInterval
 		}
 		jobs = append(jobs, job)
 	}
@@ -260,6 +284,17 @@ func effectiveJobInterval(job Job, globalInterval time.Duration, override bool) 
 	}
 	if interval <= 0 {
 		return 0, fmt.Errorf("jobs[%s].interval must be positive", job.Name)
+	}
+	return interval, nil
+}
+
+func parseRetryInterval(value, path string) (time.Duration, error) {
+	interval, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", path, value, err)
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("%s must be positive", path)
 	}
 	return interval, nil
 }

@@ -32,6 +32,7 @@ type State struct {
 	LastFinished     time.Time            `toml:"last_finished"`
 	LastSuccess      time.Time            `toml:"last_success"`
 	LastSuccessByJob map[string]time.Time `toml:"last_success_by_job"`
+	LastFailureByJob map[string]time.Time `toml:"last_failure_by_job"`
 	LastResultByJob  map[string]string    `toml:"last_result_by_job"`
 	LastExitCode     int                  `toml:"last_exit_code"`
 }
@@ -204,16 +205,19 @@ func isDue(state State, interval time.Duration, now time.Time) bool {
 	return state.LastSuccess.IsZero() || now.Sub(state.LastSuccess) >= interval
 }
 
-func isJobDue(state State, name string, interval time.Duration, now time.Time) bool {
-	lastSuccess, ok := state.LastSuccessByJob[name]
-	return !ok || lastSuccess.IsZero() || now.Sub(lastSuccess) >= interval
-}
-
 func (s *State) recordJobSuccess(name string, at time.Time) {
 	if s.LastSuccessByJob == nil {
 		s.LastSuccessByJob = make(map[string]time.Time)
 	}
 	s.LastSuccessByJob[name] = at
+	delete(s.LastFailureByJob, name)
+}
+
+func (s *State) recordJobFailure(name string, at time.Time) {
+	if s.LastFailureByJob == nil {
+		s.LastFailureByJob = make(map[string]time.Time)
+	}
+	s.LastFailureByJob[name] = at
 }
 
 func withinDuration(t time.Time, duration time.Duration, now time.Time) bool {
