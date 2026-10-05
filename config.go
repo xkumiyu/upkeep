@@ -12,35 +12,27 @@ import (
 )
 
 const (
-	defaultInterval        = 7 * 24 * time.Hour
 	defaultSnooze          = 24 * time.Hour
 	defaultApprovalTimeout = 60 * time.Second
 )
 
 type Config struct {
-	Interval        string  `toml:"interval"`
-	RetryInterval   string  `toml:"retry_interval"`
-	Snooze          string  `toml:"snooze"`
-	ApprovalTimeout string  `toml:"approval_timeout"`
-	Jobs            []Job   `toml:"jobs"`
-	Groups          []Group `toml:"groups"`
-	selectedGroup   string
+	Snooze          string     `toml:"snooze"`
+	ApprovalTimeout string     `toml:"approval_timeout"`
+	Workflows       []Workflow `toml:"workflows"`
 }
 
-type Group struct {
-	Name          string   `toml:"name"`
-	Interval      string   `toml:"interval"`
-	RetryInterval string   `toml:"retry_interval"`
-	Jobs          []string `toml:"jobs"`
+type Workflow struct {
+	Name     string `toml:"name"`
+	Interval string `toml:"interval"`
+	Jobs     []Job  `toml:"jobs"`
 }
 
 type Job struct {
-	Name          string   `toml:"name"`
-	Scope         string   `toml:"scope"`
-	Interval      string   `toml:"interval"`
-	RetryInterval string   `toml:"retry_interval"`
-	Command       string   `toml:"command"`
-	Commands      []string `toml:"commands"`
+	Name     string   `toml:"name"`
+	Scope    string   `toml:"scope"`
+	Command  string   `toml:"command"`
+	Commands []string `toml:"commands"`
 }
 
 func configCommand(configPath, stateDir string, out, errOut io.Writer) int {
@@ -77,17 +69,9 @@ func loadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("unknown config keys: %s", strings.Join(unknown, ", "))
 	}
 
-	interval, snooze, approvalTimeout, err := cfg.durations()
+	snooze, approvalTimeout, err := cfg.durations()
 	if err != nil {
 		return Config{}, err
-	}
-	if interval <= 0 {
-		return Config{}, fmt.Errorf("interval must be positive")
-	}
-	if cfg.RetryInterval != "" {
-		if _, err := parseRetryInterval(cfg.RetryInterval, "retry_interval"); err != nil {
-			return Config{}, err
-		}
 	}
 	if snooze < 0 {
 		return Config{}, fmt.Errorf("snooze must not be negative")
@@ -95,17 +79,44 @@ func loadConfig(path string) (Config, error) {
 	if approvalTimeout <= 0 {
 		return Config{}, fmt.Errorf("approval_timeout must be positive")
 	}
-	if len(cfg.Jobs) == 0 {
-		return Config{}, fmt.Errorf("at least one job is required in config.toml")
+	if len(cfg.Workflows) == 0 {
+		return Config{}, fmt.Errorf("at least one workflow is required in config.toml")
 	}
 	seen := make(map[string]bool)
-	if err := validateJobs(cfg.Jobs, "jobs", seen); err != nil {
-		return Config{}, err
-	}
-	if err := validateGroups(cfg.Groups, cfg.Jobs); err != nil {
-		return Config{}, err
+	for i, workflow := range cfg.Workflows {
+		path := fmt.Sprintf("workflows[%d]", i)
+		if strings.TrimSpace(workflow.Name) == "" {
+			return Config{}, fmt.Errorf("%s.name is required", path)
+		}
+		if seen[workflow.Name] {
+			return Config{}, fmt.Errorf("duplicate workflow name %q", workflow.Name)
+		}
+		seen[workflow.Name] = true
+		if _, err := workflow.duration(); err != nil {
+			return Config{}, err
+		}
+		if len(workflow.Jobs) == 0 {
+			return Config{}, fmt.Errorf("%s.jobs requires at least one job", path)
+		}
+		if err := validateJobs(cfg.Workflows[i].Jobs, path+".jobs", make(map[string]bool)); err != nil {
+			return Config{}, err
+		}
 	}
 	return cfg, nil
+}
+
+func (w Workflow) duration() (time.Duration, error) {
+	if w.Interval == "" {
+		return 0, fmt.Errorf("workflows[%s].interval is required", w.Name)
+	}
+	interval, err := time.ParseDuration(w.Interval)
+	if err != nil {
+		return 0, fmt.Errorf("invalid workflows[%s].interval %q: %w", w.Name, w.Interval, err)
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("workflows[%s].interval must be positive", w.Name)
+	}
+	return interval, nil
 }
 
 func validateJobs(jobs []Job, path string, seen map[string]bool) error {
@@ -115,7 +126,7 @@ func validateJobs(jobs []Job, path string, seen map[string]bool) error {
 			return fmt.Errorf("%s[%d].name is required", path, i)
 		}
 		if seen[job.Name] {
-			return fmt.Errorf("duplicate job name %q", job.Name)
+			return fmt.Errorf("%s: duplicate job name %q", path, job.Name)
 		}
 		seen[job.Name] = true
 		if job.Scope == "" {
@@ -123,20 +134,6 @@ func validateJobs(jobs []Job, path string, seen map[string]bool) error {
 		}
 		if job.Scope != "user" && job.Scope != "system" {
 			return fmt.Errorf("%s[%d].scope must be user or system", path, i)
-		}
-		if job.Interval != "" {
-			interval, err := time.ParseDuration(job.Interval)
-			if err != nil {
-				return fmt.Errorf("invalid %s[%s].interval %q: %w", path, job.Name, job.Interval, err)
-			}
-			if interval <= 0 {
-				return fmt.Errorf("%s[%s].interval must be positive", path, job.Name)
-			}
-		}
-		if job.RetryInterval != "" {
-			if _, err := parseRetryInterval(job.RetryInterval, fmt.Sprintf("%s[%s].retry_interval", path, job.Name)); err != nil {
-				return err
-			}
 		}
 		if job.Command != "" && len(job.Commands) > 0 {
 			return fmt.Errorf("%s[%s].command and commands cannot both be set", path, job.Name)
@@ -162,52 +159,6 @@ func validateJobs(jobs []Job, path string, seen map[string]bool) error {
 	return nil
 }
 
-func validateGroups(groups []Group, jobs []Job) error {
-	jobNames := make(map[string]bool, len(jobs))
-	for _, job := range jobs {
-		jobNames[job.Name] = true
-	}
-	groupNames := make(map[string]bool, len(groups))
-	jobGroups := make(map[string]string)
-	for i, group := range groups {
-		path := fmt.Sprintf("groups[%d]", i)
-		if strings.TrimSpace(group.Name) == "" {
-			return fmt.Errorf("%s.name is required", path)
-		}
-		if groupNames[group.Name] {
-			return fmt.Errorf("duplicate group name %q", group.Name)
-		}
-		groupNames[group.Name] = true
-		if group.Interval != "" {
-			parsed, err := time.ParseDuration(group.Interval)
-			if err != nil {
-				return fmt.Errorf("invalid %s.interval %q: %w", path, group.Interval, err)
-			}
-			if parsed <= 0 {
-				return fmt.Errorf("%s.interval must be positive", path)
-			}
-		}
-		if group.RetryInterval != "" {
-			if _, err := parseRetryInterval(group.RetryInterval, path+".retry_interval"); err != nil {
-				return err
-			}
-		}
-		for _, jobName := range group.Jobs {
-			if strings.TrimSpace(jobName) == "" {
-				return fmt.Errorf("%s.jobs contains an empty job name", path)
-			}
-			if !jobNames[jobName] {
-				return fmt.Errorf("unknown job %q in %s.jobs", jobName, path)
-			}
-			if previous, ok := jobGroups[jobName]; ok {
-				return fmt.Errorf("job %q belongs to multiple groups: %s and %s", jobName, previous, group.Name)
-			}
-			jobGroups[jobName] = group.Name
-		}
-	}
-	return nil
-}
-
 func (j Job) commands() []string {
 	if len(j.Commands) > 0 {
 		return j.Commands
@@ -218,101 +169,36 @@ func (j Job) commands() []string {
 	return nil
 }
 
-func (c Config) selectGroup(name string) (Config, error) {
-	for _, group := range c.Groups {
-		if group.Name == name {
-			c.selectedGroup = name
-			return c, nil
-		}
-	}
-	return Config{}, fmt.Errorf("unknown group %q", name)
-}
-
-func (c Config) allJobs() []Job {
-	jobGroups := make(map[string]Group)
-	for _, group := range c.Groups {
-		for _, jobName := range group.Jobs {
-			jobGroups[jobName] = group
-		}
-	}
-	jobs := make([]Job, 0, len(c.Jobs))
-	for _, job := range c.Jobs {
-		if job.Interval == "" {
-			job.Interval = jobGroups[job.Name].Interval
-		}
-		if job.RetryInterval == "" {
-			job.RetryInterval = jobGroups[job.Name].RetryInterval
-		}
-		if job.RetryInterval == "" {
-			job.RetryInterval = c.RetryInterval
-		}
-		jobs = append(jobs, job)
-	}
-	return jobs
-}
-
-func (c Config) orderedJobs() []Job {
-	jobs := c.allJobs()
-	if c.selectedGroup == "" {
-		return jobs
+func (c Config) selectWorkflows(names []string) (Config, error) {
+	if len(names) == 0 {
+		return c, nil
 	}
 	selected := make(map[string]bool)
-	for _, group := range c.Groups {
-		if group.Name == c.selectedGroup {
-			for _, jobName := range group.Jobs {
-				selected[jobName] = true
-			}
-			break
+	for _, name := range names {
+		selected[name] = true
+	}
+	workflows := make([]Workflow, 0, len(c.Workflows))
+	for _, workflow := range c.Workflows {
+		if selected[workflow.Name] {
+			workflows = append(workflows, workflow)
+			delete(selected, workflow.Name)
 		}
 	}
-	filtered := make([]Job, 0, len(selected))
-	for _, job := range jobs {
-		if selected[job.Name] {
-			filtered = append(filtered, job)
+	for _, name := range names {
+		if selected[name] {
+			return Config{}, fmt.Errorf("unknown workflow %q", name)
 		}
 	}
-	return filtered
+	c.Workflows = workflows
+	return c, nil
 }
 
-func effectiveJobInterval(job Job, globalInterval time.Duration, override bool) (time.Duration, error) {
-	if override || job.Interval == "" {
-		return globalInterval, nil
-	}
-	interval, err := time.ParseDuration(job.Interval)
-	if err != nil {
-		return 0, fmt.Errorf("invalid jobs[%s].interval %q: %w", job.Name, job.Interval, err)
-	}
-	if interval <= 0 {
-		return 0, fmt.Errorf("jobs[%s].interval must be positive", job.Name)
-	}
-	return interval, nil
-}
-
-func parseRetryInterval(value, path string) (time.Duration, error) {
-	interval, err := time.ParseDuration(value)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s %q: %w", path, value, err)
-	}
-	if interval <= 0 {
-		return 0, fmt.Errorf("%s must be positive", path)
-	}
-	return interval, nil
-}
-
-func (c Config) durations() (time.Duration, time.Duration, time.Duration, error) {
-	interval := defaultInterval
-	if c.Interval != "" {
-		parsed, err := time.ParseDuration(c.Interval)
-		if err != nil {
-			return 0, 0, 0, fmt.Errorf("invalid interval %q: %w", c.Interval, err)
-		}
-		interval = parsed
-	}
+func (c Config) durations() (time.Duration, time.Duration, error) {
 	snooze := defaultSnooze
 	if c.Snooze != "" {
 		parsed, err := time.ParseDuration(c.Snooze)
 		if err != nil {
-			return 0, 0, 0, fmt.Errorf("invalid snooze %q: %w", c.Snooze, err)
+			return 0, 0, fmt.Errorf("invalid snooze %q: %w", c.Snooze, err)
 		}
 		snooze = parsed
 	}
@@ -320,11 +206,11 @@ func (c Config) durations() (time.Duration, time.Duration, time.Duration, error)
 	if c.ApprovalTimeout != "" {
 		parsed, err := time.ParseDuration(c.ApprovalTimeout)
 		if err != nil {
-			return 0, 0, 0, fmt.Errorf("invalid approval_timeout %q: %w", c.ApprovalTimeout, err)
+			return 0, 0, fmt.Errorf("invalid approval_timeout %q: %w", c.ApprovalTimeout, err)
 		}
 		approvalTimeout = parsed
 	}
-	return interval, snooze, approvalTimeout, nil
+	return snooze, approvalTimeout, nil
 }
 
 func defaultConfigPath() string {

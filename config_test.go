@@ -13,9 +13,11 @@ func TestLoadConfigRejectsEmptyCommand(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "upkeep.toml")
 	if err := os.WriteFile(configPath, []byte(`
-interval = "24h"
 
-[[jobs]]
+[[workflows]]
+name = "dev-tools"
+interval = "24h"
+[[workflows.jobs]]
 name = "empty"
 scope = "user"
 command = "   "
@@ -37,7 +39,7 @@ func TestLoadConfigRejectsMissingJobsWithConfigName(t *testing.T) {
 	}
 
 	_, err := loadConfig(configPath)
-	if err == nil || err.Error() != "at least one job is required in config.toml" {
+	if err == nil || err.Error() != "at least one workflow is required in config.toml" {
 		t.Fatalf("loadConfig error = %v, want missing jobs error naming config.toml", err)
 	}
 }
@@ -46,7 +48,10 @@ func TestLoadConfigSupportsCommands(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "upkeep.toml")
 	if err := os.WriteFile(configPath, []byte(`
-[[jobs]]
+[[workflows]]
+name = "dev-tools"
+interval = "24h"
+[[workflows.jobs]]
 name = "packages"
 commands = [
   "printf first",
@@ -60,7 +65,7 @@ commands = [
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := cfg.Jobs[0].Commands, []string{"printf first", "printf second"}; !reflect.DeepEqual(got, want) {
+	if got, want := cfg.Workflows[0].Jobs[0].Commands, []string{"printf first", "printf second"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("commands = %#v, want %#v", got, want)
 	}
 }
@@ -69,7 +74,10 @@ func TestLoadConfigRejectsCommandAndCommands(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "upkeep.toml")
 	if err := os.WriteFile(configPath, []byte(`
-[[jobs]]
+[[workflows]]
+name = "dev-tools"
+interval = "24h"
+[[workflows.jobs]]
 name = "packages"
 command = "printf one"
 commands = ["printf two"]
@@ -97,9 +105,10 @@ func TestLoadConfigRejectsInvalidDuration(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "upkeep.toml")
 	if err := os.WriteFile(configPath, []byte(`
+[[workflows]]
+name = "dev-tools"
 interval = "not-a-duration"
-
-[[jobs]]
+[[workflows.jobs]]
 name = "user"
 scope = "user"
 command = "true"
@@ -113,128 +122,6 @@ command = "true"
 	}
 }
 
-func TestLoadConfigDefaultsJobScopeAndSupportsJobInterval(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`
-[[jobs]]
-name = "user"
-interval = "24h"
-command = "true"
-`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := loadConfig(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Jobs[0].Scope != "user" {
-		t.Fatalf("default job scope = %q, want user", cfg.Jobs[0].Scope)
-	}
-	if cfg.Jobs[0].Interval != "24h" {
-		t.Fatalf("job interval = %q, want 24h", cfg.Jobs[0].Interval)
-	}
-	if len(cfg.Groups) != 0 {
-		t.Fatalf("groups = %+v, want no groups for flat config", cfg.Groups)
-	}
-}
-
-func TestLoadConfigSupportsGroupsAndIntervalPrecedence(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`
-interval = "168h"
-
-[[jobs]]
-name = "daily"
-command = "true"
-
-[[jobs]]
-name = "reports-first"
-interval = "1h"
-command = "true"
-
-[[jobs]]
-name = "reports-second"
-command = "true"
-
-[[groups]]
-name = "reports"
-interval = "720h"
-jobs = ["daily", "reports-first", "reports-second"]
-`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := loadConfig(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	jobs := cfg.orderedJobs()
-	if len(jobs) != 3 {
-		t.Fatalf("ordered jobs = %+v, want 3 jobs", jobs)
-	}
-	for i, test := range []struct {
-		name     string
-		interval string
-	}{
-		{name: "daily", interval: "720h"},
-		{name: "reports-first", interval: "1h"},
-		{name: "reports-second", interval: "720h"},
-	} {
-		if jobs[i].Name != test.name || jobs[i].Interval != test.interval {
-			t.Errorf("ordered job %d = %+v, want %s with interval %s", i, jobs[i], test.name, test.interval)
-		}
-	}
-}
-
-func TestLoadConfigRejectsUnknownGroupJob(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`
-[[jobs]]
-name = "daily"
-command = "true"
-
-[[groups]]
-name = "default"
-jobs = ["missing"]
-`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig(configPath)
-	if err == nil || !strings.Contains(err.Error(), `unknown job "missing"`) {
-		t.Fatalf("loadConfig error = %v, want unknown group job error", err)
-	}
-}
-
-func TestLoadConfigRejectsJobInMultipleGroups(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`
-[[jobs]]
-name = "shared"
-command = "true"
-
-[[groups]]
-name = "default"
-jobs = ["shared"]
-
-[[groups]]
-name = "reports"
-jobs = ["shared"]
-`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig(configPath)
-	if err == nil || !strings.Contains(err.Error(), `job "shared" belongs to multiple groups`) {
-		t.Fatalf("loadConfig error = %v, want multiple group error", err)
-	}
-}
-
 func TestLoadConfigSupportsApprovalTimeout(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.toml")
@@ -242,7 +129,10 @@ func TestLoadConfigSupportsApprovalTimeout(t *testing.T) {
 snooze = "2h"
 approval_timeout = "45s"
 
-[[jobs]]
+[[workflows]]
+name = "dev-tools"
+interval = "24h"
+[[workflows.jobs]]
 name = "user"
 command = "true"
 `), 0600); err != nil {
@@ -253,7 +143,7 @@ command = "true"
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, snooze, approvalTimeout, err := cfg.durations()
+	snooze, approvalTimeout, err := cfg.durations()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,30 +156,12 @@ command = "true"
 }
 
 func TestConfigUsesDefaultApprovalTimeout(t *testing.T) {
-	_, _, approvalTimeout, err := (Config{}).durations()
+	_, approvalTimeout, err := (Config{}).durations()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if approvalTimeout != 60*time.Second {
 		t.Fatalf("approval timeout = %s, want 60s", approvalTimeout)
-	}
-}
-
-func TestLoadConfigRejectsNonPositiveJobInterval(t *testing.T) {
-	root := t.TempDir()
-	configPath := filepath.Join(root, "config.toml")
-	if err := os.WriteFile(configPath, []byte(`
-[[jobs]]
-name = "user"
-interval = "0s"
-command = "true"
-`), 0600); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := loadConfig(configPath)
-	if err == nil || !strings.Contains(err.Error(), "jobs[user].interval must be positive") {
-		t.Fatalf("loadConfig error = %v, want a positive job interval error", err)
 	}
 }
 
@@ -309,5 +181,43 @@ func TestConfigCommandShowsPaths(t *testing.T) {
 		if !strings.Contains(output.String(), want) {
 			t.Fatalf("config output = %q, want %q", output.String(), want)
 		}
+	}
+}
+
+func TestWorkflowConfigValidation(t *testing.T) {
+	valid := `[[workflows]]
+name="dev-tools"
+interval="24h"
+[[workflows.jobs]]
+name="mise"
+command="true"
+`
+	for _, test := range []struct{ name, config, want string }{
+		{"required interval", strings.Replace(valid, `interval="24h"`, "", 1), "interval is required"},
+		{"zero interval", strings.Replace(valid, `interval="24h"`, `interval="0s"`, 1), "must be positive"},
+		{"negative interval", strings.Replace(valid, `interval="24h"`, `interval="-1h"`, 1), "must be positive"},
+		{"invalid interval", strings.Replace(valid, `interval="24h"`, `interval="invalid"`, 1), "invalid workflows"},
+		{"global interval", `interval="24h"` + "\n" + valid, "unknown config keys: interval"},
+		{"flat jobs", `[[jobs]]` + "\nname=\"old\"\ncommand=\"true\"", "unknown config keys: jobs"},
+		{"groups", valid + "\n[[groups]]\nname=\"old\"", "unknown config keys: groups"},
+		{"retry interval", `retry_interval="1h"` + "\n" + valid, "unknown config keys: retry_interval"},
+		{"job interval", valid + `interval="1h"`, "workflows.jobs.interval"},
+		{"workflow retry", strings.Replace(valid, "[[workflows.jobs]]", "retry_interval=\"1h\"\n[[workflows.jobs]]", 1), "workflows.retry_interval"},
+		{"job retry", valid + `retry_interval="1h"`, "workflows.jobs.retry_interval"},
+		{"duplicate workflow", valid + valid, "duplicate workflow name"},
+		{"duplicate job", valid + "[[workflows.jobs]]\nname=\"mise\"\ncommand=\"true\"", "duplicate job name"},
+		{"empty workflow", "[[workflows]]\nname=\"empty\"\ninterval=\"1h\"", "requires at least one job"},
+		{"scope", valid + `scope="root"`, "scope must be user or system"},
+		{"nul command", strings.Replace(valid, `command="true"`, `command="\u0000"`, 1), "NUL byte"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(test.config), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := loadConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v want %s", err, test.want)
+			}
+		})
 	}
 }

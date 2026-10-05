@@ -27,14 +27,26 @@ const (
 var errAlreadyRunning = errors.New("upkeep is already running")
 
 type State struct {
-	LastAttempt      time.Time            `toml:"last_attempt"`
-	LastPrompt       time.Time            `toml:"last_prompt"`
-	LastFinished     time.Time            `toml:"last_finished"`
-	LastSuccess      time.Time            `toml:"last_success"`
-	LastSuccessByJob map[string]time.Time `toml:"last_success_by_job"`
-	LastFailureByJob map[string]time.Time `toml:"last_failure_by_job"`
-	LastResultByJob  map[string]string    `toml:"last_result_by_job"`
-	LastExitCode     int                  `toml:"last_exit_code"`
+	Workflows map[string]*WorkflowState `toml:"workflows"`
+}
+
+type WorkflowState struct {
+	LastAttempt     time.Time         `toml:"last_attempt"`
+	LastPrompt      time.Time         `toml:"last_prompt"`
+	LastFinished    time.Time         `toml:"last_finished"`
+	LastSuccess     time.Time         `toml:"last_success"`
+	LastExitCode    int               `toml:"last_exit_code"`
+	LastResultByJob map[string]string `toml:"last_result_by_job"`
+}
+
+func (s *State) workflow(name string) *WorkflowState {
+	if s.Workflows == nil {
+		s.Workflows = make(map[string]*WorkflowState)
+	}
+	if s.Workflows[name] == nil {
+		s.Workflows[name] = &WorkflowState{}
+	}
+	return s.Workflows[name]
 }
 
 func statusCommand(stateDir string, out, errOut io.Writer) int {
@@ -43,35 +55,46 @@ func statusCommand(stateDir string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	fmt.Fprintln(out, "Last run:")
-	fmt.Fprintf(out, "  Started:  %s\n", formatTime(state.LastAttempt))
-	fmt.Fprintf(out, "  Finished: %s\n", formatTime(state.LastFinished))
-	if runIncomplete(state) {
-		fmt.Fprintln(out, "  Result:   incomplete")
-	} else if state.LastFinished.IsZero() {
-		fmt.Fprintln(out, "  Result:   no run yet")
-	} else if state.LastExitCode == 0 {
-		fmt.Fprintln(out, "  Result:   succeeded")
-	} else {
-		fmt.Fprintln(out, "  Result:   failed")
+	names := make([]string, 0, len(state.Workflows))
+	for name := range state.Workflows {
+		names = append(names, name)
 	}
-	if len(state.LastResultByJob) > 0 {
-		names := make([]string, 0, len(state.LastResultByJob))
-		for name := range state.LastResultByJob {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		fmt.Fprintln(out, "  Jobs:")
-		for _, name := range names {
-			fmt.Fprintf(out, "    %s: %s\n", name, state.LastResultByJob[name])
-		}
+	sort.Strings(names)
+	if len(names) == 0 {
+		fmt.Fprintln(out, "No workflows have run yet.")
 	}
-	fmt.Fprintf(out, "\nLast successful run: %s\n", formatTime(state.LastSuccess))
+	for _, name := range names {
+		workflow := state.Workflows[name]
+		result := "no run yet"
+		if runIncomplete(*workflow) {
+			result = jobResultIncomplete
+		} else if !workflow.LastFinished.IsZero() {
+			result = jobResultSucceeded
+			if workflow.LastExitCode != 0 {
+				result = jobResultFailed
+			}
+		}
+		fmt.Fprintf(out, "Workflow %q:\n  Started:  %s\n  Finished: %s\n  Result:   %s\n", name, formatTime(workflow.LastAttempt), formatTime(workflow.LastFinished), result)
+		jobs := make([]string, 0, len(workflow.LastResultByJob))
+		for job := range workflow.LastResultByJob {
+			jobs = append(jobs, job)
+		}
+		sort.Strings(jobs)
+		if len(jobs) > 0 {
+			fmt.Fprintln(out, "  Jobs:")
+		}
+		for _, job := range jobs {
+			fmt.Fprintf(out, "    %s: %s\n", job, workflow.LastResultByJob[job])
+		}
+		fmt.Fprintf(out, "Last successful run: %s\n\n", formatTime(workflow.LastSuccess))
+	}
 	return 0
 }
 
+// Workflow histories start fresh in workflows.toml; legacy state.toml is ignored
+// and left unchanged so old job deadlines cannot become workflow deadlines.
 func loadState(stateDir string) (State, error) {
-	path := filepath.Join(stateDir, "state.toml")
+	path := filepath.Join(stateDir, "workflows.toml")
 	var state State
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return state, nil
@@ -88,7 +111,7 @@ func saveState(stateDir string, state State) error {
 	if err := os.MkdirAll(stateDir, 0700); err != nil {
 		return err
 	}
-	path := filepath.Join(stateDir, "state.toml")
+	path := filepath.Join(stateDir, "workflows.toml")
 	tmp, err := os.CreateTemp(stateDir, ".state-*.tmp")
 	if err != nil {
 		return err
@@ -201,25 +224,6 @@ func pidAlive(pid int) bool {
 	return err == nil || errors.Is(err, os.ErrPermission)
 }
 
-func isDue(state State, interval time.Duration, now time.Time) bool {
-	return state.LastSuccess.IsZero() || now.Sub(state.LastSuccess) >= interval
-}
-
-func (s *State) recordJobSuccess(name string, at time.Time) {
-	if s.LastSuccessByJob == nil {
-		s.LastSuccessByJob = make(map[string]time.Time)
-	}
-	s.LastSuccessByJob[name] = at
-	delete(s.LastFailureByJob, name)
-}
-
-func (s *State) recordJobFailure(name string, at time.Time) {
-	if s.LastFailureByJob == nil {
-		s.LastFailureByJob = make(map[string]time.Time)
-	}
-	s.LastFailureByJob[name] = at
-}
-
 func withinDuration(t time.Time, duration time.Duration, now time.Time) bool {
 	return !t.IsZero() && now.Sub(t) < duration
 }
@@ -231,7 +235,7 @@ func formatTime(value time.Time) string {
 	return value.Local().Format("2006-01-02 15:04:05 MST")
 }
 
-func runIncomplete(state State) bool {
+func runIncomplete(state WorkflowState) bool {
 	return !state.LastAttempt.IsZero() && (state.LastFinished.IsZero() || state.LastAttempt.After(state.LastFinished))
 }
 

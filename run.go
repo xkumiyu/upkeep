@@ -64,85 +64,63 @@ func (r RunResult) ExitCode() int {
 	return 0
 }
 
-func runCommand(configPath, stateDir, intervalArg string, intervalSet bool, groupName string, groupSet, dryRun, yes, interactive bool, in io.Reader, out, errOut io.Writer) int {
+func runCommand(configPath, stateDir string, names []string, force, dryRun, yes, interactive bool, in io.Reader, out, errOut io.Writer) int {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	if groupSet {
-		cfg, err = cfg.selectGroup(groupName)
-		if err != nil {
-			fmt.Fprintln(errOut, "upkeep:", err)
-			return 1
-		}
-	}
-
-	interval, snooze, approvalTimeout, err := cfg.durations()
+	cfg, err = cfg.selectWorkflows(names)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	if intervalSet {
-		interval, err = parseRunInterval(intervalArg)
-		if err != nil {
-			fmt.Fprintln(errOut, "upkeep:", err)
-			return 1
-		}
+	snooze, approvalTimeout, err := cfg.durations()
+	if err != nil {
+		fmt.Fprintln(errOut, "upkeep:", err)
+		return 1
 	}
 	if dryRun {
-		return dryRunCommand(cfg, stateDir, interval, intervalSet, out, errOut)
+		return dryRunCommand(cfg, stateDir, force, out, errOut)
 	}
 	if !interactive && !yes {
 		return 0
 	}
-	return runDueCommand(cfg, stateDir, interval, intervalSet, snooze, approvalTimeout, yes, interactive, in, out, errOut)
+	return runDueCommand(cfg, stateDir, force, snooze, approvalTimeout, yes, interactive, in, out, errOut)
 }
 
-func dryRunCommand(cfg Config, stateDir string, interval time.Duration, intervalOverride bool, out, errOut io.Writer) int {
+func dryRunCommand(cfg Config, stateDir string, force bool, out, errOut io.Writer) int {
 	state, err := loadState(stateDir)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
 	now := time.Now()
-	due, err := dueJobs(cfg, state, interval, intervalOverride, now)
+	due, err := dueWorkflows(cfg, state, force, now)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	dueSet := make(map[string]bool, len(due))
-	for _, job := range due {
-		dueSet[job.Name] = true
-	}
-	jobs := cfg.orderedJobs()
-
 	if len(due) > 0 {
 		fmt.Fprintln(out, "Updates are due.")
 	} else {
 		fmt.Fprintln(out, "Updates are not due.")
 	}
 	fmt.Fprintln(out, "\nDry run:")
-	first := true
-	for _, job := range jobs {
-		if !first {
-			fmt.Fprintln(out)
-		}
-		fmt.Fprintf(out, "  %s (%s) : ", job.Name, job.Scope)
-		if dueSet[job.Name] {
+	for _, workflow := range cfg.Workflows {
+		next, _ := nextWorkflowDue(state, workflow)
+		fmt.Fprintf(out, "  %s : ", workflow.Name)
+		if force || next.IsZero() || !now.Before(next) {
 			fmt.Fprintln(out, "due now")
-			for _, command := range job.commands() {
-				fmt.Fprintf(out, "    %s\n", command)
+			for _, job := range workflow.Jobs {
+				fmt.Fprintf(out, "    %s (%s)\n", job.Name, job.Scope)
+				for _, command := range job.commands() {
+					fmt.Fprintf(out, "      %s\n", command)
+				}
 			}
 		} else {
-			nextDue, err := nextJobDue(state, job, interval, intervalOverride)
-			if err != nil {
-				fmt.Fprintln(errOut, "upkeep:", err)
-				return 1
-			}
-			fmt.Fprintf(out, "next due in %s\n", formatDurationUntil(nextDue.Sub(now)))
+			fmt.Fprintf(out, "next due in %s\n", formatDurationUntil(next.Sub(now)))
 		}
-		first = false
 	}
 	return 0
 }
@@ -187,26 +165,25 @@ func formatDurationUntil(remaining time.Duration) string {
 	return strings.Join(parts, " ")
 }
 
-func runDueCommand(cfg Config, stateDir string, interval time.Duration, intervalOverride bool, snooze, approvalTimeout time.Duration, skipApproval, interactive bool, in io.Reader, out, errOut io.Writer) int {
+func runDueCommand(cfg Config, stateDir string, force bool, snooze, approvalTimeout time.Duration, skipApproval, interactive bool, in io.Reader, out, errOut io.Writer) int {
 	state, err := loadState(stateDir)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	now := time.Now()
-	due, err := dueJobs(cfg, state, interval, intervalOverride, now)
+	due, err := dueWorkflows(cfg, state, force, time.Now())
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	if len(due) == 0 || (!skipApproval && withinDuration(state.LastPrompt, snooze, now)) {
+	due = unsnoozedWorkflows(due, state, snooze, skipApproval, time.Now())
+	if len(due) == 0 {
 		return 0
 	}
 	if !interactive && hasSystemJobs(due) {
 		fmt.Fprintln(errOut, "upkeep: system jobs require an interactive terminal")
 		return 1
 	}
-
 	release, err := acquireLock(stateDir)
 	if err != nil {
 		if errors.Is(err, errAlreadyRunning) {
@@ -216,28 +193,25 @@ func runDueCommand(cfg Config, stateDir string, interval time.Duration, interval
 		return 1
 	}
 	defer release()
-
-	// Another terminal may have completed the run while this process waited
-	// for the lock. Re-read state before prompting.
+	// Re-read after taking the lock so completed runs cannot be overwritten.
 	state, err = loadState(stateDir)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	now = time.Now()
-	due, err = dueJobs(cfg, state, interval, intervalOverride, now)
+	due, err = dueWorkflows(cfg, state, force, time.Now())
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	if len(due) == 0 || (!skipApproval && withinDuration(state.LastPrompt, snooze, now)) {
+	due = unsnoozedWorkflows(due, state, snooze, skipApproval, time.Now())
+	if len(due) == 0 {
 		return 0
 	}
 	if !interactive && hasSystemJobs(due) {
 		fmt.Fprintln(errOut, "upkeep: system jobs require an interactive terminal")
 		return 1
 	}
-
 	if !skipApproval {
 		ok, err := askApproval(in, out, approvalTimeout)
 		if errors.Is(err, errApprovalTimeout) {
@@ -249,7 +223,10 @@ func runDueCommand(cfg Config, stateDir string, interval time.Duration, interval
 			return 1
 		}
 		if !ok {
-			state.LastPrompt = now
+			now := time.Now()
+			for _, workflow := range due {
+				state.workflow(workflow.Name).LastPrompt = now
+			}
 			if err := saveState(stateDir, state); err != nil {
 				fmt.Fprintln(errOut, "upkeep:", err)
 				return 1
@@ -257,12 +234,8 @@ func runDueCommand(cfg Config, stateDir string, interval time.Duration, interval
 			return 0
 		}
 	}
-
-	dueSet := make(map[string]bool, len(due))
-	for _, job := range due {
-		dueSet[job.Name] = true
-	}
-	result, err := runOnceLocked(cfg, stateDir, "startup", interactive, in, out, dueSet)
+	cfg.Workflows = due
+	result, err := runOnceLocked(cfg, stateDir, "startup", interactive, in, out)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
@@ -270,64 +243,52 @@ func runDueCommand(cfg Config, stateDir string, interval time.Duration, interval
 	return result.ExitCode()
 }
 
-func dueJobs(cfg Config, state State, globalInterval time.Duration, intervalOverride bool, now time.Time) ([]Job, error) {
-	jobs := cfg.orderedJobs()
-	due := make([]Job, 0, len(jobs))
-	for _, job := range jobs {
-		nextDue, err := nextJobDue(state, job, globalInterval, intervalOverride)
+func dueWorkflows(cfg Config, state State, force bool, now time.Time) ([]Workflow, error) {
+	due := make([]Workflow, 0, len(cfg.Workflows))
+	for _, workflow := range cfg.Workflows {
+		next, err := nextWorkflowDue(state, workflow)
 		if err != nil {
 			return nil, err
 		}
-		if nextDue.IsZero() || !now.Before(nextDue) {
-			due = append(due, job)
+		if force || next.IsZero() || !now.Before(next) {
+			due = append(due, workflow)
 		}
 	}
 	return due, nil
 }
 
-// A completed failure replaces the success deadline until the job succeeds.
-func nextJobDue(state State, job Job, globalInterval time.Duration, intervalOverride bool) (time.Time, error) {
-	interval, err := effectiveJobInterval(job, globalInterval, intervalOverride)
+func nextWorkflowDue(state State, workflow Workflow) (time.Time, error) {
+	interval, err := workflow.duration()
 	if err != nil {
 		return time.Time{}, err
 	}
-	if intervalOverride && interval == 0 {
+	history := state.Workflows[workflow.Name]
+	if history == nil || history.LastFinished.IsZero() || runIncomplete(*history) {
 		return time.Time{}, nil
 	}
-	last := state.LastSuccessByJob[job.Name]
-	if failedAt := state.LastFailureByJob[job.Name]; !failedAt.IsZero() {
-		last = failedAt
-		if !intervalOverride && job.RetryInterval != "" {
-			interval, err = parseRetryInterval(job.RetryInterval, fmt.Sprintf("jobs[%s].retry_interval", job.Name))
-			if err != nil {
-				return time.Time{}, err
+	return history.LastFinished.Add(interval), nil
+}
+
+func unsnoozedWorkflows(workflows []Workflow, state State, snooze time.Duration, yes bool, now time.Time) []Workflow {
+	selected := make([]Workflow, 0, len(workflows))
+	for _, workflow := range workflows {
+		history := state.Workflows[workflow.Name]
+		if yes || history == nil || !withinDuration(history.LastPrompt, snooze, now) {
+			selected = append(selected, workflow)
+		}
+	}
+	return selected
+}
+
+func hasSystemJobs(workflows []Workflow) bool {
+	for _, workflow := range workflows {
+		for _, job := range workflow.Jobs {
+			if job.Scope == "system" {
+				return true
 			}
 		}
 	}
-	if last.IsZero() {
-		return time.Time{}, nil
-	}
-	return last.Add(interval), nil
-}
-
-func hasSystemJobs(jobs []Job) bool {
-	for _, job := range jobs {
-		if job.Scope == "system" {
-			return true
-		}
-	}
 	return false
-}
-
-func parseRunInterval(value string) (time.Duration, error) {
-	interval, err := time.ParseDuration(value)
-	if err != nil {
-		return 0, fmt.Errorf("invalid run interval %q: %w", value, err)
-	}
-	if interval < 0 {
-		return 0, fmt.Errorf("run interval must not be negative")
-	}
-	return interval, nil
 }
 
 func askApproval(in io.Reader, out io.Writer, timeout time.Duration) (bool, error) {
@@ -374,108 +335,88 @@ func askApproval(in io.Reader, out io.Writer, timeout time.Duration) (bool, erro
 	}
 }
 
-func runOnceLocked(cfg Config, stateDir, trigger string, interactive bool, in io.Reader, out io.Writer, due map[string]bool) (RunResult, error) {
+func runOnceLocked(cfg Config, stateDir, trigger string, interactive bool, in io.Reader, out io.Writer) (RunResult, error) {
 	state, err := loadState(stateDir)
 	if err != nil {
 		return RunResult{}, err
 	}
 	now := time.Now()
-	allJobs := cfg.allJobs()
-	jobs := cfg.orderedJobs()
-	state.LastAttempt = now
-	state.LastExitCode = incompleteExitCode
-	state.LastResultByJob = make(map[string]string, len(allJobs))
-	for _, job := range allJobs {
-		state.LastResultByJob[job.Name] = jobResultNotRun
-		if due == nil || due[job.Name] {
-			state.LastResultByJob[job.Name] = jobResultIncomplete
-		}
-	}
-	if err := saveState(stateDir, state); err != nil {
-		return RunResult{}, err
-	}
-	checkpointJob := func(name, jobResult string, success bool) error {
-		state.LastResultByJob[name] = jobResult
-		if success {
-			state.recordJobSuccess(name, time.Now())
-		} else if jobResult == jobResultFailed {
-			state.recordJobFailure(name, time.Now())
-		}
-		return saveState(stateDir, state)
-	}
-
 	logFile, err := openLog(stateDir, trigger, now)
 	if err != nil {
 		return RunResult{}, err
 	}
 	defer logFile.Close()
-
-	output := runOutput{
-		log:      logFile,
-		terminal: out,
-		color:    isTerminalWriter(out),
-	}
+	output := runOutput{log: logFile, terminal: out, color: isTerminalWriter(out)}
 	output.message(ansiCyan, "Started update run at %s.\n", formatTime(now))
-
 	result := RunResult{}
 	usePTY := interactive && isTerminalReader(in) && isTerminalWriter(out)
-	for _, job := range jobs {
-		if due != nil && !due[job.Name] {
-			continue
+	for _, workflow := range cfg.Workflows {
+		history := state.workflow(workflow.Name)
+		history.LastAttempt = time.Now()
+		history.LastExitCode = incompleteExitCode
+		history.LastResultByJob = make(map[string]string, len(workflow.Jobs))
+		for _, job := range workflow.Jobs {
+			history.LastResultByJob[job.Name] = jobResultNotRun
 		}
-		output.message(ansiCyan, "\n%s\nRunning %s job %q.\n%s\n", jobSeparator, job.Scope, job.Name, jobSeparator)
-
-		if job.Scope == "system" {
-			if !interactive {
-				output.message(ansiYellow, "Skipped system job %q: interactive sudo is required.\n", job.Name)
-				result.Failed++
-				if err := checkpointJob(job.Name, jobResultSkipped, false); err != nil {
-					return result, err
-				}
-				continue
-			}
-			if err := authenticateSudo(in, out); err != nil {
-				output.message(ansiRed, "Sudo authentication failed: %v.\n", err)
-				output.message(ansiYellow, "Skipped system job %q: sudo authentication failed.\n", job.Name)
-				result.Failed++
-				if err := checkpointJob(job.Name, jobResultSkipped, false); err != nil {
-					return result, err
-				}
-				continue
-			}
-		}
-
-		commandOutput := output.commandWriter()
-		fmt.Fprintln(commandOutput)
-		err := executeJob(job, in, commandOutput, usePTY)
-		fmt.Fprintln(commandOutput)
-		if err != nil {
-			output.message(ansiRed, "Job %q failed: %v.\n", job.Name, err)
-			result.Failed++
-			if err := checkpointJob(job.Name, jobResultFailed, false); err != nil {
-				return result, err
-			}
-			continue
-		}
-		if err := checkpointJob(job.Name, jobResultSucceeded, true); err != nil {
+		if err := saveState(stateDir, state); err != nil {
 			return result, err
 		}
-		output.message(ansiGreen, "Job %q completed.\n%s\n", job.Name, jobSeparator)
+		failed := 0
+		output.message(ansiCyan, "\nWorkflow %q.\n", workflow.Name)
+		for _, job := range workflow.Jobs {
+			history.LastResultByJob[job.Name] = jobResultIncomplete
+			if err := saveState(stateDir, state); err != nil {
+				return result, err
+			}
+			output.message(ansiCyan, "\n%s\nRunning %s job %q.\n%s\n", jobSeparator, job.Scope, job.Name, jobSeparator)
+			var jobErr error
+			if job.Scope == "system" {
+				if !interactive {
+					jobErr = errors.New("interactive sudo is required")
+				} else {
+					jobErr = authenticateSudo(in, out)
+				}
+				if jobErr != nil {
+					output.message(ansiYellow, "Skipped system job %q: sudo authentication failed or unavailable: %v.\n", job.Name, jobErr)
+					history.LastResultByJob[job.Name] = jobResultSkipped
+				}
+			}
+			if jobErr == nil {
+				commandOutput := output.commandWriter()
+				fmt.Fprintln(commandOutput)
+				jobErr = executeJob(job, in, commandOutput, usePTY)
+				fmt.Fprintln(commandOutput)
+				history.LastResultByJob[job.Name] = jobResultSucceeded
+				if jobErr != nil {
+					history.LastResultByJob[job.Name] = jobResultFailed
+				}
+			}
+			if jobErr != nil {
+				output.message(ansiRed, "Job %q failed: %v.\n", job.Name, jobErr)
+				failed++
+				result.Failed++
+			} else {
+				output.message(ansiGreen, "Job %q completed.\n%s\n", job.Name, jobSeparator)
+			}
+			if err := saveState(stateDir, state); err != nil {
+				return result, err
+			}
+		}
+		history.LastFinished = time.Now()
+		history.LastExitCode = 0
+		if failed > 0 {
+			history.LastExitCode = 1
+		} else {
+			history.LastSuccess = history.LastFinished
+		}
+		if err := saveState(stateDir, state); err != nil {
+			return result, err
+		}
 	}
-
-	finished := time.Now()
-	state.LastFinished = finished
-	state.LastExitCode = result.ExitCode()
 	if result.Failed == 0 {
-		state.LastSuccess = finished
-	}
-	if err := saveState(stateDir, state); err != nil {
-		return result, err
-	}
-	if result.Failed == 0 {
-		output.message(ansiGreen, "Finished successfully at %s.\n", formatTime(finished))
+		output.message(ansiGreen, "Finished successfully at %s.\n", formatTime(time.Now()))
 	} else {
-		output.message(ansiRed, "Finished at %s with %d failed job(s).\n", formatTime(finished), result.Failed)
+		output.message(ansiRed, "Finished at %s with %d failed job(s).\n", formatTime(time.Now()), result.Failed)
 	}
 	return result, nil
 }
