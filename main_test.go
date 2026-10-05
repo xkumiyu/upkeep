@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -13,7 +16,7 @@ func TestRunCLIHelpListsCommands(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Usage: upkeep <command> [options]",
-		"run       Run due jobs.",
+		"run       Run due workflows.",
 		"config    Show configuration and state paths.",
 		"status    Show the last run status.",
 		"unlock    Remove a stale run lock.",
@@ -54,12 +57,11 @@ func TestRunCLICommandHelpDescribesRun(t *testing.T) {
 		t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
 	}
 	for _, want := range []string{
-		"Usage: upkeep run [options]",
-		"Run due jobs.",
+		"Usage: upkeep run [workflow...] [options]",
+		"Run selected workflows in declaration order; no names selects all workflows.",
 		"Options:",
-		"  --interval DURATION  override all configured intervals for this run.",
-		"  --group NAME         run only jobs in the named group.",
-		"  --dry-run            show due jobs without running them.",
+		"  --force              ignore deadlines; approval is still required.",
+		"  --dry-run            show workflow deadlines and due jobs without running them.",
 		"  --yes, -y            run without asking for approval.",
 		"  --config PATH        path to config.toml.",
 		"  --state-dir PATH     directory for state, locks, and logs.",
@@ -163,5 +165,99 @@ func TestRunCLIRejectsUnusedConfigFlag(t *testing.T) {
 		if !strings.Contains(errorsOutput.String(), "flag provided but not defined: -config") {
 			t.Fatalf("%s errors = %q, want undefined flag error", command, errorsOutput.String())
 		}
+	}
+}
+
+func TestWorkflowConfigAndInterspersedSelection(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.toml")
+	err := os.WriteFile(path, []byte(`[[workflows]]
+name="dev-tools"
+interval="168h"
+[[workflows.jobs]]
+name="mise"
+command="printf done"
+`), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errs strings.Builder
+	if code := runCLI([]string{"run", "dev-tools", "--config", path, "--dry-run", "dev-tools", "--state-dir", filepath.Join(root, "state")}, nil, &out, &errs); code != 0 {
+		t.Fatalf("code=%d errors=%s", code, errs.String())
+	}
+	if strings.Count(out.String(), "printf done") != 1 {
+		t.Fatalf("output=%s", out.String())
+	}
+}
+
+func TestWorkflowCLISelectionOrderAndTerminator(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.toml")
+	config := `[[workflows]]
+name="first"
+interval="24h"
+[[workflows.jobs]]
+name="shared"
+command="printf FIRST"
+[[workflows]]
+name="second"
+interval="24h"
+[[workflows.jobs]]
+name="shared"
+command="printf SECOND"
+[[workflows]]
+name="--force"
+interval="24h"
+[[workflows.jobs]]
+name="shared"
+command="printf DASH"
+`
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errs strings.Builder
+	dir := filepath.Join(root, "state")
+	if code := runCLI([]string{"run", "second", "--config", path, "-y", "first", "--state-dir", dir, "second"}, nil, &out, &errs); code != 0 {
+		t.Fatal(errs.String())
+	}
+	if strings.Count(out.String(), "FIRST") != 1 || strings.Count(out.String(), "SECOND") != 1 || strings.Index(out.String(), "FIRST") > strings.Index(out.String(), "SECOND") || strings.Contains(out.String(), "DASH") {
+		t.Fatal(out.String())
+	}
+	out.Reset()
+	// --force after -- is a literal workflow name, even when flags precede --.
+	if code := runCLI([]string{"run", "--yes", "--config", path, "--state-dir", dir, "--", "first", "--force"}, nil, &out, &errs); code != 0 {
+		t.Fatal(errs.String())
+	}
+	if strings.Contains(out.String(), "FIRST") || !strings.Contains(out.String(), "DASH") {
+		t.Fatalf("terminator ignored: %s", out.String())
+	}
+	out.Reset()
+	if code := runCLI([]string{"run", "--config", path, "--state-dir", filepath.Join(root, "absent"), "--yes", "first", "missing"}, nil, &out, &errs); code != 1 || !strings.Contains(errs.String(), `unknown workflow "missing"`) {
+		t.Fatalf("out=%s errors=%s", out.String(), errs.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "absent")); !os.IsNotExist(err) {
+		t.Fatal("unknown selection caused side effects")
+	}
+	for _, flag := range []string{"--interval=0", "--group=first"} {
+		if code := runCLI([]string{"run", flag}, nil, io.Discard, io.Discard); code != 2 {
+			t.Fatalf("legacy flag %s accepted", flag)
+		}
+	}
+}
+
+func TestWorkflowCLIFlagValuesAndLiteralHelp(t *testing.T) {
+	var out, errs strings.Builder
+	if code := runCLI([]string{"run", "--config", "--help", "--dry-run"}, nil, &out, &errs); code != 1 || !strings.Contains(errs.String(), "--help") {
+		t.Fatalf("dash value treated as flag: code=%d out=%s errors=%s", code, out.String(), errs.String())
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "config.toml")
+	if err := os.WriteFile(path, []byte("[[workflows]]\nname=\"dev-tools\"\ninterval=\"24h\"\n[[workflows.jobs]]\nname=\"job\"\ncommand=\"true\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errs.Reset()
+	if code := runCLI([]string{"run", "--config", path, "--yes", "--", "--help"}, nil, &out, &errs); code != 1 || !strings.Contains(errs.String(), `unknown workflow "--help"`) {
+		t.Fatalf("literal help parsed as help: %s %s", out.String(), errs.String())
 	}
 }

@@ -1,19 +1,23 @@
-# Global defaults:
-# interval = "168h"         # Minimum time between update runs.
-# retry_interval = "2h"     # Time after a command failure; defaults to each job's effective interval.
-# snooze = "24h"            # Suppress prompts for this long after a decline.
+# Optional approval settings:
+# snooze = "24h"            # Suppress a workflow's prompts after a decline.
 # approval_timeout = "60s"  # Time allowed for an approval response.
 
-# [[jobs]]
-# name = "mise-package-update"
-# command = "mise upgrade"
+[[workflows]]
+name = "dev-tools"
+interval = "168h" # Required positive duration; starts when the workflow finishes.
+
+[[workflows.jobs]]
+name = "mise"
+command = "mise up"
+
+# Every job belongs to its enclosing workflow. Job names must be unique
+# within a workflow, but can be reused in another workflow.
+
+# [[workflows]]
+# name = "system-packages"
+# interval = "24h"
 #
-# [[jobs]]
-# name = "system-package-update"
-# interval = "24h"      # Overrides all other interval settings.
-# retry_interval = "1h" # Overrides group and global retry intervals.
-# scope = "system"     # Runs through sudo; requires an interactive terminal. Defaults to "user".
-# commands = [
-#   "apt-get update",
-#   "apt-get -y upgrade"
-# ]
+# [[workflows.jobs]]
+# name = "packages"
+# scope = "system" # Uses sudo and requires an interactive terminal; default is "user".
+# commands = ["apt-get update", "apt-get -y upgrade"]
