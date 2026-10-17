@@ -64,7 +64,7 @@ func (r RunResult) ExitCode() int {
 	return 0
 }
 
-func runCommand(configPath, stateDir string, names []string, force, dryRun, yes, interactive bool, in io.Reader, out, errOut io.Writer) int {
+func runCommand(configPath, stateDir string, names []string, ifDue, dryRun, yes, interactive bool, in io.Reader, out, errOut io.Writer) int {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
@@ -81,43 +81,55 @@ func runCommand(configPath, stateDir string, names []string, force, dryRun, yes,
 		return 1
 	}
 	if dryRun {
-		return dryRunCommand(cfg, stateDir, force, out, errOut)
+		return dryRunCommand(cfg, stateDir, ifDue, snooze, yes, out, errOut)
 	}
 	if !interactive && !yes {
 		return 0
 	}
-	return runDueCommand(cfg, stateDir, force, snooze, approvalTimeout, yes, interactive, in, out, errOut)
+	return runWorkflowsCommand(cfg, stateDir, ifDue, snooze, approvalTimeout, yes, interactive, in, out, errOut)
 }
 
-func dryRunCommand(cfg Config, stateDir string, force bool, out, errOut io.Writer) int {
+func dryRunCommand(cfg Config, stateDir string, ifDue bool, snooze time.Duration, yes bool, out, errOut io.Writer) int {
 	state, err := loadState(stateDir)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
 	now := time.Now()
-	due, err := dueWorkflows(cfg, state, force, now)
+	due, err := eligibleWorkflows(cfg, state, ifDue, snooze, yes, now)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	if len(due) > 0 {
+	if !ifDue {
+		fmt.Fprintln(out, "Selected workflows will run.")
+	} else if len(due) > 0 {
 		fmt.Fprintln(out, "Updates are due.")
 	} else {
-		fmt.Fprintln(out, "Updates are not due.")
+		fmt.Fprintln(out, "No workflows to run.")
+	}
+	selected := make(map[string]bool, len(due))
+	for _, workflow := range due {
+		selected[workflow.Name] = true
 	}
 	fmt.Fprintln(out, "\nDry run:")
 	for _, workflow := range cfg.Workflows {
 		next, _ := nextWorkflowDue(state, workflow)
 		fmt.Fprintf(out, "  %s : ", workflow.Name)
-		if force || next.IsZero() || !now.Before(next) {
-			fmt.Fprintln(out, "due now")
+		if selected[workflow.Name] {
+			if ifDue {
+				fmt.Fprintln(out, "due now")
+			} else {
+				fmt.Fprintln(out, "selected")
+			}
 			for _, job := range workflow.Jobs {
 				fmt.Fprintf(out, "    %s (%s)\n", job.Name, job.Scope)
 				for _, command := range job.commands() {
 					fmt.Fprintf(out, "      %s\n", command)
 				}
 			}
+		} else if next.IsZero() || !now.Before(next) {
+			fmt.Fprintln(out, "snoozed")
 		} else {
 			fmt.Fprintf(out, "next due in %s\n", formatDurationUntil(next.Sub(now)))
 		}
@@ -165,18 +177,17 @@ func formatDurationUntil(remaining time.Duration) string {
 	return strings.Join(parts, " ")
 }
 
-func runDueCommand(cfg Config, stateDir string, force bool, snooze, approvalTimeout time.Duration, skipApproval, interactive bool, in io.Reader, out, errOut io.Writer) int {
+func runWorkflowsCommand(cfg Config, stateDir string, ifDue bool, snooze, approvalTimeout time.Duration, skipApproval, interactive bool, in io.Reader, out, errOut io.Writer) int {
 	state, err := loadState(stateDir)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	due, err := dueWorkflows(cfg, state, force, time.Now())
+	due, err := eligibleWorkflows(cfg, state, ifDue, snooze, skipApproval, time.Now())
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	due = unsnoozedWorkflows(due, state, snooze, skipApproval, time.Now())
 	if len(due) == 0 {
 		return 0
 	}
@@ -199,12 +210,11 @@ func runDueCommand(cfg Config, stateDir string, force bool, snooze, approvalTime
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	due, err = dueWorkflows(cfg, state, force, time.Now())
+	due, err = eligibleWorkflows(cfg, state, ifDue, snooze, skipApproval, time.Now())
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	due = unsnoozedWorkflows(due, state, snooze, skipApproval, time.Now())
 	if len(due) == 0 {
 		return 0
 	}
@@ -235,12 +245,27 @@ func runDueCommand(cfg Config, stateDir string, force bool, snooze, approvalTime
 		}
 	}
 	cfg.Workflows = due
-	result, err := runOnceLocked(cfg, stateDir, "startup", interactive, in, out)
+	trigger := "manual"
+	if ifDue {
+		trigger = "startup"
+	}
+	result, err := runOnceLocked(cfg, stateDir, trigger, interactive, in, out)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
 	return result.ExitCode()
+}
+
+func eligibleWorkflows(cfg Config, state State, ifDue bool, snooze time.Duration, yes bool, now time.Time) ([]Workflow, error) {
+	workflows, err := dueWorkflows(cfg, state, !ifDue, now)
+	if err != nil {
+		return nil, err
+	}
+	if ifDue {
+		workflows = unsnoozedWorkflows(workflows, state, snooze, yes, now)
+	}
+	return workflows, nil
 }
 
 func dueWorkflows(cfg Config, state State, force bool, now time.Time) ([]Workflow, error) {
@@ -292,7 +317,7 @@ func hasSystemJobs(workflows []Workflow) bool {
 }
 
 func askApproval(in io.Reader, out io.Writer, timeout time.Duration) (bool, error) {
-	fmt.Fprint(out, "upkeep: updates are due. Run now? [y/N] ")
+	fmt.Fprint(out, "upkeep: Run now? [y/N] ")
 	if in == nil {
 		return false, errors.New("approval input is unavailable")
 	}

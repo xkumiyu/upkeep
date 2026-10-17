@@ -1,11 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunCLIHelpListsCommands(t *testing.T) {
@@ -16,9 +18,9 @@ func TestRunCLIHelpListsCommands(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Usage: upkeep <command> [options]",
-		"run       Run due workflows.",
+		"run       Run selected workflows.",
 		"config    Show configuration and state paths.",
-		"status    Show the last run status.",
+		"status    Show last run results for configured workflows.",
 		"unlock    Remove a stale run lock.",
 		"-v, --version  Show the upkeep version.",
 	} {
@@ -34,6 +36,64 @@ func TestRunCLIHelpListsCommands(t *testing.T) {
 	}
 	if strings.Contains(output.String(), "check") {
 		t.Fatalf("help = %q, want no check command", output.String())
+	}
+}
+
+func TestRunCLIModes(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		flags   []string
+		snoozed bool
+		wantRun bool
+	}{
+		{"manual", nil, false, true},
+		{"manual-snoozed", nil, true, true},
+		{"if-due", []string{"--if-due"}, false, false},
+		// --yes retains the existing snooze bypass, but still respects deadlines.
+		{"if-due-yes-snoozed", []string{"--if-due"}, true, true},
+	} {
+		for _, dryRun := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/dryRun=%t", test.name, dryRun), func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "config.toml")
+				if err := os.WriteFile(path, []byte("[[workflows]]\nname=\"dev-tools\"\ninterval=\"24h\"\n[[workflows.jobs]]\nname=\"job\"\ncommand=\"printf EXECUTED\"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				dir := filepath.Join(root, "state")
+				history := &WorkflowState{LastFinished: time.Now()}
+				if test.snoozed {
+					history.LastFinished = time.Time{}
+					history.LastPrompt = time.Now()
+				}
+				if err := saveState(dir, State{Workflows: map[string]*WorkflowState{"dev-tools": history}}); err != nil {
+					t.Fatal(err)
+				}
+				args := append([]string{"run", "--config", path, "--state-dir", dir, "--yes"}, test.flags...)
+				if dryRun {
+					args = append(args, "--dry-run")
+				}
+				var out, errs strings.Builder
+				if code := runCLI(args, nil, &out, &errs); code != 0 || strings.Contains(out.String(), "EXECUTED") != test.wantRun {
+					t.Fatalf("code=%d output=%s errors=%s", code, out.String(), errs.String())
+				}
+				state, err := loadState(dir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !state.Workflows["dev-tools"].LastAttempt.IsZero() != (test.wantRun && !dryRun) {
+					t.Fatalf("unexpected attempt: %+v", state.Workflows["dev-tools"])
+				}
+			})
+		}
+	}
+}
+
+func TestRunCLIRejectsRemovedForceFlag(t *testing.T) {
+	for _, flags := range [][]string{{"--force"}, {"--force", "--if-due"}, {"--if-due", "--force"}} {
+		var out, errs strings.Builder
+		if code := runCLI(append([]string{"run"}, flags...), nil, &out, &errs); code != 2 || !strings.Contains(errs.String(), "flag provided but not defined: -force") {
+			t.Fatalf("code=%d output=%s errors=%s", code, out.String(), errs.String())
+		}
 	}
 }
 
@@ -58,11 +118,11 @@ func TestRunCLICommandHelpDescribesRun(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Usage: upkeep run [workflow...] [options]",
-		"Run selected workflows in declaration order; no names selects all workflows.",
+		"Run selected workflows in declaration order; no names selects all workflows. Ignore deadlines and snooze; approval is still required.",
 		"Options:",
-		"  --force              ignore deadlines; approval is still required.",
-		"  --dry-run            show workflow deadlines and due jobs without running them.",
-		"  --yes, -y            run without asking for approval.",
+		"  --if-due             respect workflow deadlines and snooze (for shell startup).",
+		"  --dry-run            show jobs selected by the current mode without running them.",
+		"  --yes, -y            run without asking for approval; bypass snooze, but respect --if-due deadlines.",
 		"  --config PATH        path to config.toml.",
 		"  --state-dir PATH     directory for state, locks, and logs.",
 	} {
@@ -91,8 +151,9 @@ func TestRunCLICommandHelpUsesStandardStructure(t *testing.T) {
 		{
 			command:     "status",
 			usage:       "Usage: upkeep status [options]",
-			description: "Show the last run times and result.",
+			description: "Show configured workflows in declaration order, with last run results or no run yet. Job results describe the last run.",
 			options: []string{
+				"  --config PATH        path to config.toml.",
 				"  --state-dir PATH     directory for state, locks, and logs.",
 			},
 		},
@@ -156,7 +217,7 @@ func TestRunCLIRejectsUnexpectedArguments(t *testing.T) {
 }
 
 func TestRunCLIRejectsUnusedConfigFlag(t *testing.T) {
-	for _, command := range []string{"status", "unlock"} {
+	for _, command := range []string{"unlock"} {
 		var output, errorsOutput strings.Builder
 		code := runCLI([]string{command, "--config", "ignored.toml"}, strings.NewReader(""), &output, &errorsOutput)
 		if code != 2 {
@@ -228,7 +289,7 @@ command="printf DASH"
 	if code := runCLI([]string{"run", "--yes", "--config", path, "--state-dir", dir, "--", "first", "--force"}, nil, &out, &errs); code != 0 {
 		t.Fatal(errs.String())
 	}
-	if strings.Contains(out.String(), "FIRST") || !strings.Contains(out.String(), "DASH") {
+	if !strings.Contains(out.String(), "FIRST") || !strings.Contains(out.String(), "DASH") {
 		t.Fatalf("terminator ignored: %s", out.String())
 	}
 	out.Reset()

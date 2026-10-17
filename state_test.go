@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -51,6 +52,15 @@ func TestAcquireLockRemovesStaleOwner(t *testing.T) {
 	}
 }
 
+func statusTestConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[[workflows]]\nname=\"dev-tools\"\ninterval=\"24h\"\n[[workflows.jobs]]\nname=\"job\"\ncommand=\"true\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestStatusCommandUsesHumanReadableLabels(t *testing.T) {
 	stateDir := t.TempDir()
 	history := WorkflowState{
@@ -69,7 +79,7 @@ func TestStatusCommandUsesHumanReadableLabels(t *testing.T) {
 	}
 
 	var output, errorsOutput strings.Builder
-	code := statusCommand(stateDir, &output, &errorsOutput)
+	code := statusCommand(statusTestConfig(t), stateDir, &output, &errorsOutput)
 	if code != 0 {
 		t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
 	}
@@ -78,7 +88,7 @@ func TestStatusCommandUsesHumanReadableLabels(t *testing.T) {
 		"  Started:",
 		"  Finished:",
 		"  Result:   succeeded",
-		"  Jobs:",
+		"  Jobs (last run):",
 		"    system-packages: failed",
 		"    unselected-job: not run",
 		"    user-packages: succeeded",
@@ -106,7 +116,7 @@ func TestStatusCommandReportsIncompleteRun(t *testing.T) {
 	}
 
 	var output, errorsOutput strings.Builder
-	code := statusCommand(stateDir, &output, &errorsOutput)
+	code := statusCommand(statusTestConfig(t), stateDir, &output, &errorsOutput)
 	if code != 0 {
 		t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
 	}
@@ -129,12 +139,116 @@ func TestStatusCommandReportsIncompleteRunWithoutFinish(t *testing.T) {
 	}
 
 	var output, errorsOutput strings.Builder
-	code := statusCommand(stateDir, &output, &errorsOutput)
+	code := statusCommand(statusTestConfig(t), stateDir, &output, &errorsOutput)
 	if code != 0 {
 		t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
 	}
 	if !strings.Contains(output.String(), "Result:   incomplete") {
 		t.Fatalf("status = %q, want incomplete result", output.String())
+	}
+}
+
+func TestStatusUsesCurrentConfigAndPreservesHistory(t *testing.T) {
+	for _, savedHistory := range []bool{false, true} {
+		for _, customConfig := range []bool{false, true} {
+			t.Run(fmt.Sprintf("history=%t/customConfig=%t", savedHistory, customConfig), func(t *testing.T) {
+				root := t.TempDir()
+				t.Setenv("XDG_CONFIG_HOME", root)
+				path := filepath.Join(root, "upkeep", "config.toml")
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if customConfig {
+					path = filepath.Join(root, "custom.toml")
+				}
+				var config strings.Builder
+				for _, name := range []string{"z-current", "renamed", "a-new"} {
+					fmt.Fprintf(&config, "[[workflows]]\nname=%q\ninterval=\"24h\"\n[[workflows.jobs]]\nname=\"current-job\"\ncommand=\"true\"\n", name)
+				}
+				if err := os.WriteFile(path, []byte(config.String()), 0600); err != nil {
+					t.Fatal(err)
+				}
+				dir := filepath.Join(root, "state")
+				statePath := filepath.Join(dir, "workflows.toml")
+				var before []byte
+				if savedHistory {
+					state := State{Workflows: map[string]*WorkflowState{
+						"z-current": {LastAttempt: time.Now().Add(-time.Minute), LastFinished: time.Now(), LastExitCode: 1, LastResultByJob: map[string]string{"previous-job": jobResultFailed}},
+						"removed":   {LastFinished: time.Now()},
+						"old-name":  {LastFinished: time.Now()},
+					}}
+					if err := saveState(dir, state); err != nil {
+						t.Fatal(err)
+					}
+					var err error
+					before, err = os.ReadFile(statePath)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				args := []string{"status", "--state-dir", dir}
+				if customConfig {
+					args = append(args, "--config", path)
+				}
+				var out, errs strings.Builder
+				if code := runCLI(args, nil, &out, &errs); code != 0 {
+					t.Fatalf("code=%d errors=%s", code, errs.String())
+				}
+				output := out.String()
+				if strings.Count(output, "Workflow ") != 3 || strings.Contains(output, "removed") || strings.Contains(output, "old-name") {
+					t.Fatal(output)
+				}
+				previous := -1
+				for _, name := range []string{"z-current", "renamed", "a-new"} {
+					index := strings.Index(output, fmt.Sprintf("Workflow %q:", name))
+					if index <= previous {
+						t.Fatalf("workflow order: %s", output)
+					}
+					previous = index
+				}
+				wantNew := 3
+				if savedHistory {
+					wantNew = 2
+					if !strings.Contains(output, "Result:   failed") || !strings.Contains(output, "previous-job: failed") || strings.Contains(output, "current-job") {
+						t.Fatalf("previous results lost: %s", output)
+					}
+				}
+				if strings.Count(output, "Result:   no run yet") != wantNew || strings.Count(output, "Started:  never") != wantNew {
+					t.Fatalf("new workflows missing: %s", output)
+				}
+				after, err := os.ReadFile(statePath)
+				if savedHistory && (err != nil || string(after) != string(before)) {
+					t.Fatalf("history changed: %s %v", after, err)
+				}
+				if !savedHistory {
+					if _, err := os.Stat(dir); !os.IsNotExist(err) {
+						t.Fatalf("status created state directory: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStatusRejectsUnreadableOrInvalidConfig(t *testing.T) {
+	for _, content := range []string{"missing", "[[invalid", "[[workflows]]\nname=\"incomplete\"\n"} {
+		t.Run(content, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "config.toml")
+			if content != "missing" {
+				if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dir := filepath.Join(root, "state")
+			var out, errs strings.Builder
+			if code := runCLI([]string{"status", "--config", path, "--state-dir", dir}, nil, &out, &errs); code != 1 || out.Len() != 0 || !strings.Contains(errs.String(), "upkeep:") {
+				t.Fatalf("code=%d output=%s errors=%s", code, out.String(), errs.String())
+			}
+			if _, err := os.Stat(dir); !os.IsNotExist(err) {
+				t.Fatalf("status created state directory: %v", err)
+			}
+		})
 	}
 }
 
