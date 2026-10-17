@@ -49,22 +49,22 @@ func (s *State) workflow(name string) *WorkflowState {
 	return s.Workflows[name]
 }
 
-func statusCommand(stateDir string, out, errOut io.Writer) int {
+func statusCommand(configPath, stateDir string, out, errOut io.Writer) int {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		fmt.Fprintln(errOut, "upkeep:", err)
+		return 1
+	}
 	state, err := loadState(stateDir)
 	if err != nil {
 		fmt.Fprintln(errOut, "upkeep:", err)
 		return 1
 	}
-	names := make([]string, 0, len(state.Workflows))
-	for name := range state.Workflows {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		fmt.Fprintln(out, "No workflows have run yet.")
-	}
-	for _, name := range names {
-		workflow := state.Workflows[name]
+	for _, configured := range cfg.Workflows {
+		workflow := state.Workflows[configured.Name]
+		if workflow == nil {
+			workflow = &WorkflowState{}
+		}
 		result := "no run yet"
 		if runIncomplete(*workflow) {
 			result = jobResultIncomplete
@@ -74,14 +74,14 @@ func statusCommand(stateDir string, out, errOut io.Writer) int {
 				result = jobResultFailed
 			}
 		}
-		fmt.Fprintf(out, "Workflow %q:\n  Started:  %s\n  Finished: %s\n  Result:   %s\n", name, formatTime(workflow.LastAttempt), formatTime(workflow.LastFinished), result)
+		fmt.Fprintf(out, "Workflow %q:\n  Started:  %s\n  Finished: %s\n  Result:   %s\n", configured.Name, formatTime(workflow.LastAttempt), formatTime(workflow.LastFinished), result)
 		jobs := make([]string, 0, len(workflow.LastResultByJob))
 		for job := range workflow.LastResultByJob {
 			jobs = append(jobs, job)
 		}
 		sort.Strings(jobs)
 		if len(jobs) > 0 {
-			fmt.Fprintln(out, "  Jobs:")
+			fmt.Fprintln(out, "  Jobs (last run):")
 		}
 		for _, job := range jobs {
 			fmt.Fprintf(out, "    %s: %s\n", job, workflow.LastResultByJob[job])

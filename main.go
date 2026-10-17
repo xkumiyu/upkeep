@@ -37,19 +37,19 @@ func runCLI(args []string, in io.Reader, out, errOut io.Writer) int {
 	fs.Usage = func() { printCommandUsage(errOut, command) }
 	configPath := defaultConfigPath()
 	stateDir := defaultStateDir()
-	if command == "run" || command == "config" {
+	if command == "run" || command == "config" || command == "status" {
 		fs.StringVar(&configPath, "config", configPath, "path to config.toml")
 	}
 	fs.StringVar(&stateDir, "state-dir", stateDir, "directory for state, locks, and logs")
 	help := false
 	fs.BoolVar(&help, "help", false, "show command help")
 	fs.BoolVar(&help, "h", false, "show command help")
-	force := false
+	ifDue := false
 	dryRun := false
 	yes := false
 	if command == "run" {
-		fs.BoolVar(&force, "force", false, "ignore workflow deadlines")
-		fs.BoolVar(&dryRun, "dry-run", false, "show workflow deadlines and due jobs without running them")
+		fs.BoolVar(&ifDue, "if-due", false, "only run due, unsnoozed workflows")
+		fs.BoolVar(&dryRun, "dry-run", false, "show selected jobs without running them")
 		fs.BoolVar(&yes, "yes", false, "run without asking for approval")
 		fs.BoolVar(&yes, "y", false, "run without asking for approval")
 	}
@@ -102,7 +102,7 @@ func runCLI(args []string, in io.Reader, out, errOut io.Writer) int {
 
 	switch command {
 	case "run":
-		return runCommand(configPath, stateDir, names, force, dryRun, yes, isInteractive(), in, out, errOut)
+		return runCommand(configPath, stateDir, names, ifDue, dryRun, yes, isInteractive(), in, out, errOut)
 	case "config":
 		return configCommand(configPath, stateDir, out, errOut)
 	case "unlock":
@@ -112,7 +112,7 @@ func runCLI(args []string, in io.Reader, out, errOut io.Writer) int {
 		}
 		return 0
 	case "status":
-		return statusCommand(stateDir, out, errOut)
+		return statusCommand(configPath, stateDir, out, errOut)
 	case "-h", "--help":
 		printUsage(out)
 		return 0
@@ -127,9 +127,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: upkeep <command> [options]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  run       Run due workflows.")
+	fmt.Fprintln(w, "  run       Run selected workflows.")
 	fmt.Fprintln(w, "  config    Show configuration and state paths.")
-	fmt.Fprintln(w, "  status    Show the last run status.")
+	fmt.Fprintln(w, "  status    Show last run results for configured workflows.")
 	fmt.Fprintln(w, "  unlock    Remove a stale run lock.")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Options:")
@@ -145,11 +145,11 @@ func printCommandUsage(w io.Writer, command string) {
 	switch command {
 	case "run":
 		usage = "Usage: upkeep run [workflow...] [options]"
-		description = "Run selected workflows in declaration order; no names selects all workflows."
+		description = "Run selected workflows in declaration order; no names selects all workflows. Ignore deadlines and snooze; approval is still required."
 		options = []string{
-			"  --force              ignore deadlines; approval is still required.",
-			"  --dry-run            show workflow deadlines and due jobs without running them.",
-			"  --yes, -y            run without asking for approval.",
+			"  --if-due             respect workflow deadlines and snooze (for shell startup).",
+			"  --dry-run            show jobs selected by the current mode without running them.",
+			"  --yes, -y            run without asking for approval; bypass snooze, but respect --if-due deadlines.",
 			"  --config PATH        path to config.toml.",
 			"  --state-dir PATH     directory for state, locks, and logs.",
 		}
@@ -162,8 +162,9 @@ func printCommandUsage(w io.Writer, command string) {
 		}
 	case "status":
 		usage = "Usage: upkeep status [options]"
-		description = "Show the last run times and result."
+		description = "Show configured workflows in declaration order, with last run results or no run yet. Job results describe the last run."
 		options = []string{
+			"  --config PATH        path to config.toml.",
 			"  --state-dir PATH     directory for state, locks, and logs.",
 		}
 	case "unlock":

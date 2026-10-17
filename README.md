@@ -1,6 +1,6 @@
 # upkeep
 
-`upkeep` is a small CLI that runs configured package-update commands in workflows only when they're due.
+`upkeep` is a small CLI that runs configured package-update commands in workflows.
 
 Define the update commands you want to run and how often each workflow should run.
 Use `upkeep` manually or invoke it from shell startup without running every update command on every terminal launch.
@@ -23,8 +23,8 @@ Configure workflows with nested jobs in `~/.config/upkeep/config.toml`; see
 ## Use
 
 ```sh
-upkeep run           # run due workflows; asks for approval
-upkeep run --dry-run # show due workflows without running them
+upkeep run           # run all workflows regardless of deadlines or snooze; asks for approval
+upkeep run --dry-run # preview selected jobs without running them
 ```
 
 Run `upkeep --help` or `upkeep <command> --help` for other commands and options.
@@ -40,8 +40,9 @@ Concurrent invocations share a lock; a new invocation exits when another
 `upkeep` is designed to be invoked when an interactive shell starts.
 It checks which workflows are due and only runs update commands when needed.
 
-Add the following to your shell startup file (for example, `~/.bashrc`):
+Add the following to your shell startup file (for example, `~/.bashrc`).
+Replace existing startup calls to `upkeep run` with `upkeep run --if-due`:
 
 ```sh
-case $- in *i*) upkeep run ;; esac
+case $- in *i*) upkeep run --if-due ;; esac
 ```

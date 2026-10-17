@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -206,7 +207,7 @@ func TestRunOnceLockedRefreshesSudoCredentialsForEachSystemJob(t *testing.T) {
 	}
 }
 
-func TestRunDueCommandRunsAfterApproval(t *testing.T) {
+func TestRunWorkflowsCommandRunsAfterApproval(t *testing.T) {
 	configDir := t.TempDir()
 	stateDir := filepath.Join(t.TempDir(), "state")
 	configPath := filepath.Join(configDir, "upkeep.toml")
@@ -230,7 +231,7 @@ command = "printf 'startup update'"
 	}
 
 	var output, errorsOutput strings.Builder
-	code := runDueCommand(cfg, stateDir, false, 24*time.Hour, 60*time.Second, false, true, strings.NewReader("y\n"), &output, &errorsOutput)
+	code := runWorkflowsCommand(cfg, stateDir, true, 24*time.Hour, 60*time.Second, false, true, strings.NewReader("y\n"), &output, &errorsOutput)
 	if code != 0 {
 		t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
 	}
@@ -249,11 +250,11 @@ command = "printf 'startup update'"
 	}
 }
 
-func TestRunDueCommandDoesNotSnoozeAfterFailedApproval(t *testing.T) {
+func TestRunWorkflowsCommandDoesNotSnoozeAfterFailedApproval(t *testing.T) {
 	stateDir := t.TempDir()
 	cfg := Config{Workflows: []Workflow{{Name: "dev-tools", Interval: "24h", Jobs: []Job{{Name: "user-packages", Scope: "user", Command: "false"}}}}}
 	var output, errorsOutput strings.Builder
-	code := runDueCommand(cfg, stateDir, true, 24*time.Hour, 60*time.Second, false, true, strings.NewReader("y\n"), &output, &errorsOutput)
+	code := runWorkflowsCommand(cfg, stateDir, true, 24*time.Hour, 60*time.Second, false, true, strings.NewReader("y\n"), &output, &errorsOutput)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1; errors = %q", code, errorsOutput.String())
 	}
@@ -269,14 +270,14 @@ func TestRunDueCommandDoesNotSnoozeAfterFailedApproval(t *testing.T) {
 	}
 }
 
-func TestRunDueCommandTimesOutWithoutSnoozing(t *testing.T) {
+func TestRunWorkflowsCommandTimesOutWithoutSnoozing(t *testing.T) {
 	stateDir := t.TempDir()
 	cfg := Config{Workflows: []Workflow{{Name: "dev-tools", Interval: "24h", Jobs: []Job{{Name: "user-packages", Scope: "user", Command: "false"}}}}}
 	reader, writer := io.Pipe()
 	defer reader.Close()
 	defer writer.Close()
 	var output, errorsOutput strings.Builder
-	code := runDueCommand(cfg, stateDir, true, 24*time.Hour, 10*time.Millisecond, false, true, reader, &output, &errorsOutput)
+	code := runWorkflowsCommand(cfg, stateDir, true, 24*time.Hour, 10*time.Millisecond, false, true, reader, &output, &errorsOutput)
 	if code != 0 {
 		t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
 	}
@@ -297,15 +298,15 @@ func TestRunDueCommandTimesOutWithoutSnoozing(t *testing.T) {
 	release()
 }
 
-func TestRunDueCommandWithForceStillAsksForApproval(t *testing.T) {
+func TestManualRunStillAsksForApproval(t *testing.T) {
 	stateDir := t.TempDir()
 	cfg := Config{Workflows: []Workflow{{Name: "dev-tools", Interval: "24h", Jobs: []Job{{Name: "user-packages", Scope: "user", Command: ":"}}}}}
 	var output, errorsOutput strings.Builder
-	code := runDueCommand(cfg, stateDir, true, 24*time.Hour, 60*time.Second, false, true, strings.NewReader("n\n"), &output, &errorsOutput)
+	code := runWorkflowsCommand(cfg, stateDir, false, 24*time.Hour, 60*time.Second, false, true, strings.NewReader("n\n"), &output, &errorsOutput)
 	if code != 0 {
 		t.Fatalf("exit code = %d, errors = %q", code, errorsOutput.String())
 	}
-	if !strings.Contains(output.String(), "updates are due") {
+	if !strings.Contains(output.String(), "Run now?") {
 		t.Fatalf("output = %q, want approval prompt", output.String())
 	}
 	state, err := loadState(stateDir)
@@ -317,14 +318,14 @@ func TestRunDueCommandWithForceStillAsksForApproval(t *testing.T) {
 	}
 }
 
-func TestRunDueCommandRejectsSystemJobsWithoutInteractiveTerminal(t *testing.T) {
+func TestRunWorkflowsCommandRejectsSystemJobsWithoutInteractiveTerminal(t *testing.T) {
 	stateDir := t.TempDir()
 	cfg := Config{Workflows: []Workflow{{Name: "dev-tools", Interval: "24h", Jobs: []Job{
 		{Name: "user", Scope: "user", Command: ":"},
 		{Name: "system", Scope: "system", Command: ":"},
 	}}}}
 	var output, errorsOutput strings.Builder
-	code := runDueCommand(cfg, stateDir, true, 24*time.Hour, 60*time.Second, true, false, strings.NewReader(""), &output, &errorsOutput)
+	code := runWorkflowsCommand(cfg, stateDir, true, 24*time.Hour, 60*time.Second, true, false, strings.NewReader(""), &output, &errorsOutput)
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1", code)
 	}
@@ -340,7 +341,7 @@ func TestRunDueCommandRejectsSystemJobsWithoutInteractiveTerminal(t *testing.T) 
 	}
 }
 
-func TestRunDueCommandPreservesCommandInputAfterApproval(t *testing.T) {
+func TestRunWorkflowsCommandPreservesCommandInputAfterApproval(t *testing.T) {
 	configDir := t.TempDir()
 	stateDir := filepath.Join(t.TempDir(), "state")
 	configPath := filepath.Join(configDir, "upkeep.toml")
@@ -364,7 +365,7 @@ command = "read value && printf 'received %s' \"$value\""
 	}
 
 	var output, errorsOutput strings.Builder
-	code := runDueCommand(cfg, stateDir, false, 24*time.Hour, 60*time.Second, false, true, strings.NewReader("y\ncommand input\n"), &output, &errorsOutput)
+	code := runWorkflowsCommand(cfg, stateDir, true, 24*time.Hour, 60*time.Second, false, true, strings.NewReader("y\ncommand input\n"), &output, &errorsOutput)
 	if code != 0 {
 		t.Fatalf("exit code = %d, errors = %q, output = %q", code, errorsOutput.String(), output.String())
 	}
@@ -467,7 +468,7 @@ func TestExecuteJobWithPTYPreservesTerminalOutputAndInput(t *testing.T) {
 	}
 }
 
-func TestRunCLIWithYesAndForceRunsImmediately(t *testing.T) {
+func TestRunCLIWithYesRunsImmediately(t *testing.T) {
 	configDir := t.TempDir()
 	stateDir := filepath.Join(t.TempDir(), "state")
 	configPath := filepath.Join(configDir, "upkeep.toml")
@@ -488,7 +489,6 @@ command = "printf 'manual update'"
 	code := runCLI([]string{
 		"run",
 		"-y",
-		"--force",
 		"--config", configPath,
 		"--state-dir", stateDir,
 	}, strings.NewReader(""), &output, &errorsOutput)
@@ -498,7 +498,7 @@ command = "printf 'manual update'"
 	if !strings.Contains(output.String(), "manual update") {
 		t.Fatalf("output = %q, want manual command output", output.String())
 	}
-	if strings.Contains(output.String(), "updates are due") {
+	if strings.Contains(output.String(), "Run now?") {
 		t.Fatalf("output = %q, want no approval prompt", output.String())
 	}
 }
@@ -532,7 +532,7 @@ func TestWorkflowsMixedDueFailureCadenceAndNames(t *testing.T) {
 		{Name: "weekly", Interval: "168h", Jobs: []Job{{Name: "shared", Command: "printf later-workflow"}}},
 	}}
 	var out, errs strings.Builder
-	if code := runDueCommand(cfg, dir, false, 0, time.Second, true, false, nil, &out, &errs); code != 1 {
+	if code := runWorkflowsCommand(cfg, dir, true, 0, time.Second, true, false, nil, &out, &errs); code != 1 {
 		t.Fatalf("code=%d errors=%s", code, errs.String())
 	}
 	if !strings.Contains(out.String(), "later-job") || !strings.Contains(out.String(), "later-workflow") || strings.Contains(out.String(), "NOT-DUE") {
@@ -589,11 +589,11 @@ func TestWorkflowsMixedDueFailureCadenceAndNames(t *testing.T) {
 	}
 }
 
-func TestWorkflowSnoozeForceAndYes(t *testing.T) {
+func TestWorkflowIfDueSnoozeAndYes(t *testing.T) {
 	dir := t.TempDir()
 	cfg := workflowConfig(Job{Name: "job", Command: "true"})
 	var out, errs strings.Builder
-	if code := runDueCommand(cfg, dir, true, 24*time.Hour, time.Second, false, true, strings.NewReader("n\n"), &out, &errs); code != 0 {
+	if code := runWorkflowsCommand(cfg, dir, true, 24*time.Hour, time.Second, false, true, strings.NewReader("n\n"), &out, &errs); code != 0 {
 		t.Fatal(errs.String())
 	}
 	state, err := loadState(dir)
@@ -605,10 +605,10 @@ func TestWorkflowSnoozeForceAndYes(t *testing.T) {
 		t.Fatalf("decline changed deadlines: %+v", history)
 	}
 	out.Reset()
-	if code := runDueCommand(cfg, dir, true, 24*time.Hour, time.Second, false, true, strings.NewReader("y\n"), &out, &errs); code != 0 || out.Len() != 0 {
-		t.Fatalf("force bypassed snooze: %s %s", out.String(), errs.String())
+	if code := runWorkflowsCommand(cfg, dir, true, 24*time.Hour, time.Second, false, true, strings.NewReader("y\n"), &out, &errs); code != 0 || out.Len() != 0 {
+		t.Fatalf("if-due bypassed snooze: %s %s", out.String(), errs.String())
 	}
-	if code := runDueCommand(cfg, dir, false, 24*time.Hour, time.Second, true, false, nil, &out, &errs); code != 0 {
+	if code := runWorkflowsCommand(cfg, dir, true, 24*time.Hour, time.Second, true, false, nil, &out, &errs); code != 0 {
 		t.Fatal(errs.String())
 	}
 	state, err = loadState(dir)
@@ -678,7 +678,7 @@ func TestSignaledJobContinuesWorkflow(t *testing.T) {
 func TestWorkflowDryRunNoSideEffects(t *testing.T) {
 	dir := t.TempDir()
 	recent := time.Now().Add(-time.Hour)
-	state := State{Workflows: map[string]*WorkflowState{"later": {LastFinished: recent}}}
+	state := State{Workflows: map[string]*WorkflowState{"later": {LastFinished: recent}, "snoozed": {LastPrompt: recent}}}
 	if err := saveState(dir, state); err != nil {
 		t.Fatal(err)
 	}
@@ -690,12 +690,20 @@ func TestWorkflowDryRunNoSideEffects(t *testing.T) {
 	cfg := Config{Workflows: []Workflow{
 		{Name: "due", Interval: "24h", Jobs: []Job{{Name: "job", Scope: "user", Command: "touch " + marker}}},
 		{Name: "later", Interval: "24h", Jobs: []Job{{Name: "job", Scope: "system", Command: "touch " + marker}}},
+		{Name: "snoozed", Interval: "24h", Jobs: []Job{{Name: "job", Scope: "user", Command: "printf SNOOZED"}}},
 	}}
 	var out, errs strings.Builder
-	if code := dryRunCommand(cfg, dir, false, &out, &errs); code != 0 {
+	if code := dryRunCommand(cfg, dir, true, 24*time.Hour, false, &out, &errs); code != 0 {
 		t.Fatal(errs.String())
 	}
-	if !strings.Contains(out.String(), "due : due now") || !strings.Contains(out.String(), "later : next due in") {
+	if !strings.Contains(out.String(), "due : due now") || !strings.Contains(out.String(), "later : next due in") || !strings.Contains(out.String(), "snoozed : snoozed") || strings.Contains(out.String(), "SNOOZED") {
+		t.Fatal(out.String())
+	}
+	out.Reset()
+	if code := dryRunCommand(cfg, dir, false, 24*time.Hour, false, &out, &errs); code != 0 {
+		t.Fatal(errs.String())
+	}
+	if strings.Count(out.String(), " : selected") != 3 || !strings.Contains(out.String(), "SNOOZED") || strings.Count(out.String(), "touch "+marker) != 2 {
 		t.Fatal(out.String())
 	}
 	after, err := os.ReadFile(filepath.Join(dir, "workflows.toml"))
@@ -739,11 +747,11 @@ func TestDecliningWorkflowDoesNotSnoozeOtherWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errs strings.Builder
-	if code := runDueCommand(selected, dir, false, 24*time.Hour, time.Second, false, true, strings.NewReader("n\n"), &out, &errs); code != 0 {
+	if code := runWorkflowsCommand(selected, dir, true, 24*time.Hour, time.Second, false, true, strings.NewReader("n\n"), &out, &errs); code != 0 {
 		t.Fatal(errs.String())
 	}
 	out.Reset()
-	if code := runDueCommand(cfg, dir, false, 24*time.Hour, time.Second, false, true, strings.NewReader("y\n"), &out, &errs); code != 0 {
+	if code := runWorkflowsCommand(cfg, dir, true, 24*time.Hour, time.Second, false, true, strings.NewReader("y\n"), &out, &errs); code != 0 {
 		t.Fatal(errs.String())
 	}
 	state, err := loadState(dir)
@@ -753,7 +761,7 @@ func TestDecliningWorkflowDoesNotSnoozeOtherWorkflows(t *testing.T) {
 	if !state.Workflows["A"].LastAttempt.IsZero() || state.Workflows["B"].LastSuccess.IsZero() {
 		t.Fatalf("snooze crossed workflows: %+v", state)
 	}
-	if !strings.Contains(out.String(), "updates are due") {
+	if !strings.Contains(out.String(), "Run now?") {
 		t.Fatal("B approval was suppressed")
 	}
 }
@@ -773,5 +781,107 @@ func TestWorkflowNamesWithSeparatorsDoNotCollide(t *testing.T) {
 	}
 	if state.Workflows["a.b"].LastResultByJob["c"] != jobResultFailed || state.Workflows["a"].LastResultByJob["b.c"] != jobResultSucceeded {
 		t.Fatal("ambiguous names collided")
+	}
+}
+
+func TestRunCommandManualAndIfDue(t *testing.T) {
+	for _, history := range []string{"not-due", "snoozed", "due"} {
+		for _, ifDue := range []bool{false, true} {
+			for _, approval := range []string{"y\n", "n\n"} {
+				t.Run(fmt.Sprintf("%s/ifDue=%t/approval=%q", history, ifDue, approval), func(t *testing.T) {
+					root := t.TempDir()
+					path := filepath.Join(root, "config.toml")
+					if err := os.WriteFile(path, []byte(`snooze="24h"
+[[workflows]]
+name="selected"
+interval="24h"
+[[workflows.jobs]]
+name="job"
+command="printf EXECUTED"
+[[workflows]]
+name="other"
+interval="24h"
+[[workflows.jobs]]
+name="job"
+command="printf UNSELECTED"
+`), 0600); err != nil {
+						t.Fatal(err)
+					}
+					dir := filepath.Join(root, "state")
+					recent := time.Now().Add(-time.Hour)
+					previous := &WorkflowState{}
+					if history == "not-due" {
+						previous.LastFinished = recent
+					}
+					if history == "snoozed" {
+						previous.LastPrompt = recent
+					}
+					if err := saveState(dir, State{Workflows: map[string]*WorkflowState{"selected": previous}}); err != nil {
+						t.Fatal(err)
+					}
+					var out, errs strings.Builder
+					code := runCommand(path, dir, []string{"selected"}, ifDue, false, false, true, strings.NewReader(approval), &out, &errs)
+					eligible := !ifDue || history == "due"
+					wantRun := eligible && approval == "y\n"
+					if code != 0 || strings.Contains(out.String(), "EXECUTED") != wantRun || strings.Contains(out.String(), "UNSELECTED") {
+						t.Fatalf("code=%d output=%s errors=%s wantRun=%t", code, out.String(), errs.String(), wantRun)
+					}
+					if strings.Contains(out.String(), "Run now?") != eligible {
+						t.Fatalf("approval eligibility=%t output=%s", eligible, out.String())
+					}
+					state, err := loadState(dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !state.Workflows["selected"].LastAttempt.IsZero() != wantRun || state.Workflows["other"] != nil {
+						t.Fatalf("unexpected execution state: %+v", state)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestRunCommandSafeguardsInBothModes(t *testing.T) {
+	for _, ifDue := range []bool{false, true} {
+		for _, safeguard := range []string{"noninteractive", "system", "locked"} {
+			t.Run(fmt.Sprintf("ifDue=%t/%s", ifDue, safeguard), func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "config.toml")
+				scope := "user"
+				if safeguard == "system" {
+					scope = "system"
+				}
+				config := fmt.Sprintf("[[workflows]]\nname=\"dev-tools\"\ninterval=\"24h\"\n[[workflows.jobs]]\nname=\"job\"\nscope=%q\ncommand=\"printf EXECUTED\"\n", scope)
+				if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+					t.Fatal(err)
+				}
+				dir := filepath.Join(root, "state")
+				if safeguard == "locked" {
+					release, err := acquireLock(dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer release()
+				}
+				var out, errs strings.Builder
+				code := runCommand(path, dir, nil, ifDue, false, safeguard != "noninteractive", false, nil, &out, &errs)
+				wantCode := 0
+				if safeguard == "system" {
+					wantCode = 1
+					if !strings.Contains(errs.String(), "system jobs require an interactive terminal") {
+						t.Fatal(errs.String())
+					}
+				}
+				if code != wantCode || out.Len() != 0 {
+					t.Fatalf("code=%d output=%s errors=%s", code, out.String(), errs.String())
+				}
+				for _, name := range []string{"workflows.toml", "logs"} {
+					if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+						t.Fatalf("unexpected side effect: %s (%v)", name, err)
+					}
+				}
+			})
+		}
 	}
 }
